@@ -21,6 +21,7 @@
 #include "core/log.h"
 
 #include <string.h>
+#include <stdlib.h>
 
 #define MAX_REPLICATED_TRADERS 128
 
@@ -310,13 +311,29 @@ void mp_trade_sync_broadcast_route_state(int route_id)
     }
 
     mp_trade_route_instance *mpr = mp_trade_route_find_by_claudius_route(route_id);
-    uint8_t buf[768];
+    uint32_t payload_size =
+        (uint32_t)(sizeof(uint16_t) + sizeof(uint32_t) + sizeof(int32_t) + sizeof(uint32_t)) +
+        (uint32_t)RESOURCE_MAX *
+            (uint32_t)(4 * sizeof(int32_t) + 2 * sizeof(uint8_t) + 4 * sizeof(int32_t));
+    uint8_t *buf;
     net_serializer s;
-    net_serializer_init(&s, buf, sizeof(buf));
-    net_write_u16(&s, NET_EVENT_TRADE_POLICY_CHANGED);
+
+    if (!mpr) {
+        log_error("Cannot broadcast route state for unknown route", 0, route_id);
+        return;
+    }
+
+    buf = (uint8_t *)malloc(payload_size);
+    if (!buf) {
+        log_error("Failed to allocate route sync payload", 0, (int)payload_size);
+        return;
+    }
+
+    net_serializer_init(&s, buf, payload_size);
+    net_write_u16(&s, NET_EVENT_ROUTE_STATE_SYNC);
     net_write_u32(&s, net_session_get_authoritative_tick());
     net_write_i32(&s, route_id);
-    net_write_u32(&s, mpr ? mpr->instance_id : 0);
+    net_write_u32(&s, mpr->instance_id);
 
     /* Write full route state */
     for (int r = RESOURCE_MIN; r < RESOURCE_MAX; r++) {
@@ -324,24 +341,22 @@ void mp_trade_sync_broadcast_route_state(int route_id)
         net_write_i32(&s, trade_route_traded(route_id, r, 0));   /* buy traded */
         net_write_i32(&s, trade_route_limit(route_id, r, 1));   /* sell limit */
         net_write_i32(&s, trade_route_traded(route_id, r, 1));   /* sell traded */
-        if (mpr) {
-            net_write_u8(&s, mpr->resources[r].export_enabled);
-            net_write_u8(&s, mpr->resources[r].import_enabled);
-            net_write_i32(&s, mpr->resources[r].export_limit);
-            net_write_i32(&s, mpr->resources[r].import_limit);
-            net_write_i32(&s, mpr->resources[r].exported_this_year);
-            net_write_i32(&s, mpr->resources[r].imported_this_year);
-        } else {
-            net_write_u8(&s, 0);
-            net_write_u8(&s, 0);
-            net_write_i32(&s, 0);
-            net_write_i32(&s, 0);
-            net_write_i32(&s, 0);
-            net_write_i32(&s, 0);
-        }
+        net_write_u8(&s, mpr->resources[r].export_enabled);
+        net_write_u8(&s, mpr->resources[r].import_enabled);
+        net_write_i32(&s, mpr->resources[r].export_limit);
+        net_write_i32(&s, mpr->resources[r].import_limit);
+        net_write_i32(&s, mpr->resources[r].exported_this_year);
+        net_write_i32(&s, mpr->resources[r].imported_this_year);
+    }
+
+    if (net_serializer_has_overflow(&s)) {
+        log_error("Route sync payload overflow", 0, route_id);
+        free(buf);
+        return;
     }
 
     net_session_broadcast(NET_MSG_HOST_EVENT, buf, (uint32_t)net_serializer_position(&s));
+    free(buf);
 }
 
 void mp_trade_sync_broadcast_route_policy(int route_id, int resource,
@@ -351,12 +366,14 @@ void mp_trade_sync_broadcast_route_policy(int route_id, int resource,
         return;
     }
 
-    uint8_t buf[32];
+    mp_trade_route_instance *mpr = mp_trade_route_find_by_claudius_route(route_id);
+    uint8_t buf[48];
     net_serializer s;
     net_serializer_init(&s, buf, sizeof(buf));
     net_write_u16(&s, NET_EVENT_ROUTE_POLICY_SET);
     net_write_u32(&s, net_session_get_authoritative_tick());
     net_write_i32(&s, route_id);
+    net_write_u32(&s, mpr ? mpr->network_route_id : 0);
     net_write_i32(&s, resource);
     net_write_u8(&s, (uint8_t)is_export);
     net_write_u8(&s, (uint8_t)enabled);
@@ -371,12 +388,14 @@ void mp_trade_sync_broadcast_route_limit(int route_id, int resource,
         return;
     }
 
-    uint8_t buf[32];
+    mp_trade_route_instance *mpr = mp_trade_route_find_by_claudius_route(route_id);
+    uint8_t buf[48];
     net_serializer s;
     net_serializer_init(&s, buf, sizeof(buf));
     net_write_u16(&s, NET_EVENT_ROUTE_LIMIT_SET);
     net_write_u32(&s, net_session_get_authoritative_tick());
     net_write_i32(&s, route_id);
+    net_write_u32(&s, mpr ? mpr->network_route_id : 0);
     net_write_i32(&s, resource);
     net_write_u8(&s, (uint8_t)is_buying);
     net_write_i32(&s, amount);
@@ -535,7 +554,7 @@ void mp_trade_sync_handle_event(uint16_t event_type,
             }
             break;
         }
-        case NET_EVENT_TRADE_POLICY_CHANGED: {
+        case NET_EVENT_ROUTE_STATE_SYNC: {
             int route_id = net_read_i32(&s);
             uint32_t route_instance_id = net_read_u32(&s);
             mp_trade_route_instance *mpr = mp_trade_route_get(route_instance_id);

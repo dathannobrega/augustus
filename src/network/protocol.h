@@ -5,7 +5,7 @@
 
 #include <stdint.h>
 
-#define NET_PROTOCOL_VERSION        3
+#define NET_PROTOCOL_VERSION        4
 #define NET_MAX_PAYLOAD_SIZE        65536
 #define NET_MAX_PLAYER_NAME         32
 #define NET_MAX_PLAYERS             8
@@ -80,6 +80,7 @@ typedef enum {
     NET_EVENT_ROUTE_DISABLED,
     NET_EVENT_ROUTE_POLICY_SET,
     NET_EVENT_ROUTE_LIMIT_SET,
+    NET_EVENT_ROUTE_STATE_SYNC,
     NET_EVENT_PLAYER_RECONNECTED,
     NET_EVENT_PLAYER_CITY_OFFLINE,
     NET_EVENT_PLAYER_CITY_ONLINE,
@@ -182,7 +183,11 @@ typedef struct {
 
 typedef struct {
     uint32_t timestamp_ms;
+    uint32_t sample_id;
+    uint8_t flags;
 } net_msg_heartbeat;
+
+#define NET_HEARTBEAT_FLAG_RESPONSE 0x01
 
 int net_protocol_validate_header(const net_packet_header *header);
 int net_protocol_check_version(uint16_t remote_version);

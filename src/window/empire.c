@@ -192,7 +192,7 @@ typedef struct {
 } trade_edge;
 
 typedef struct {
-    int route_id;
+    uint32_t route_key;
     int is_sea;
     int edge_count;
     int edge_indices[MAX_ROUTE_EDGES_PER_LIST];
@@ -226,8 +226,8 @@ static void draw_sidebar_city_item(const grid_box_item *item);
 static int draw_images_at_interval(int image_id, int x_draw_offset, int y_draw_offset,
     int start_x, int start_y, int end_x, int end_y, int interval, int remaining);
 void window_empire_collect_trade_edges(void);
-static void window_empire_draw_trade_route_pulses_by_id(int route_id, int is_sea_route, int x_offset, int y_offset);
-static void window_empire_draw_static_trade_route_by_id(int route_id, int is_sea_route, int x_offset, int y_offset, int animate_pulses);
+static void window_empire_draw_trade_route_pulses_by_id(uint32_t route_key, int is_sea_route, int x_offset, int y_offset);
+static void window_empire_draw_static_trade_route_by_id(uint32_t route_key, int is_sea_route, int x_offset, int y_offset, int animate_pulses);
 // 'styles' get functions
 static trade_row_style get_trade_row_style(const empire_city *city, int is_sell, int max_draw_width, trade_style_variant variant);
 static open_trade_button_style get_open_trade_button_style(int x, int y, trade_style_variant variant);
@@ -794,31 +794,31 @@ static void clear_trade_route_edge_lists(void)
     g_trade_route_list_count = 0;
     memset(g_trade_route_lists, 0, sizeof(g_trade_route_lists));
     for (int i = 0; i < MAX_TRADE_ROUTE_LISTS; i++) {
-        g_trade_route_lists[i].route_id = -1;
+        g_trade_route_lists[i].route_key = 0;
         for (int j = 0; j < MAX_ROUTE_EDGES_PER_LIST; j++) {
             g_trade_route_lists[i].edge_indices[j] = -1;
         }
     }
 }
 
-static trade_route_edge_list *find_trade_route_edge_list_mutable(int route_id)
+static trade_route_edge_list *find_trade_route_edge_list_mutable_by_key(uint32_t route_key)
 {
     for (int i = 0; i < g_trade_route_list_count; i++) {
-        if (g_trade_route_lists[i].route_id == route_id) {
+        if (g_trade_route_lists[i].route_key == route_key) {
             return &g_trade_route_lists[i];
         }
     }
     return 0;
 }
 
-static const trade_route_edge_list *find_trade_route_edge_list(int route_id)
+static const trade_route_edge_list *find_trade_route_edge_list(uint32_t route_key)
 {
-    return find_trade_route_edge_list_mutable(route_id);
+    return find_trade_route_edge_list_mutable_by_key(route_key);
 }
 
-static trade_route_edge_list *ensure_trade_route_edge_list(int route_id, int is_sea)
+static trade_route_edge_list *ensure_trade_route_edge_list(uint32_t route_key, int is_sea)
 {
-    trade_route_edge_list *route_list = find_trade_route_edge_list_mutable(route_id);
+    trade_route_edge_list *route_list = find_trade_route_edge_list_mutable_by_key(route_key);
     if (route_list) {
         route_list->is_sea = is_sea;
         return route_list;
@@ -829,7 +829,7 @@ static trade_route_edge_list *ensure_trade_route_edge_list(int route_id, int is_
     }
 
     route_list = &g_trade_route_lists[g_trade_route_list_count++];
-    route_list->route_id = route_id;
+    route_list->route_key = route_key;
     route_list->is_sea = is_sea;
     route_list->edge_count = 0;
     for (int i = 0; i < MAX_ROUTE_EDGES_PER_LIST; i++) {
@@ -872,8 +872,9 @@ static int collect_multiplayer_trade_route_edge(mp_trade_route_instance *route, 
         return 0;
     }
 
+    uint32_t route_key = route->network_route_id ? route->network_route_id : route->instance_id;
     trade_route_edge_list *route_list = ensure_trade_route_edge_list(
-        route->claudius_route_id, route->transport == MP_TROUTE_SEA);
+        route_key, route->transport == MP_TROUTE_SEA);
     if (!route_list) {
         return 0;
     }
@@ -910,7 +911,8 @@ void window_empire_collect_trade_edges(void)
 
         int route_id = route_object->trade_route_id;
         const empire_object *trade_city_object = empire_object_get_trade_city(route_id);
-        trade_route_edge_list *route_list = ensure_trade_route_edge_list(route_id, is_sea_route);
+        trade_route_edge_list *route_list =
+            ensure_trade_route_edge_list((uint32_t)route_id, is_sea_route);
         if (!trade_city_object || !route_list || !our_city_object) {
             continue;
         }
@@ -953,11 +955,11 @@ void window_empire_collect_trade_edges(void)
 #endif
 }
 
-static void window_empire_draw_static_trade_route_by_id(int route_id, int is_sea_route,
+static void window_empire_draw_static_trade_route_by_id(uint32_t route_key, int is_sea_route,
                                                         int x_offset, int y_offset,
                                                         int animate_pulses)
 {
-    const trade_route_edge_list *route_list = find_trade_route_edge_list(route_id);
+    const trade_route_edge_list *route_list = find_trade_route_edge_list(route_key);
     if (!route_list) {
         return;
     }
@@ -982,7 +984,7 @@ static void window_empire_draw_static_trade_route_by_id(int route_id, int is_sea
         edge->drawn = 1; // mark as processed for this frame
     }
     if (animate_pulses && config_get(CONFIG_UI_ANIMATE_TRADE_ROUTES)) {
-        window_empire_draw_trade_route_pulses_by_id(route_id, is_sea_route, x_offset, y_offset);
+        window_empire_draw_trade_route_pulses_by_id(route_key, is_sea_route, x_offset, y_offset);
     }
 }
 
@@ -992,13 +994,15 @@ void window_empire_draw_static_trade_waypoints(const empire_object *route_object
         return;
     }
     int is_sea_route = route_object->type == EMPIRE_OBJECT_SEA_TRADE_ROUTE;
-    window_empire_draw_static_trade_route_by_id(route_object->trade_route_id, is_sea_route, x_offset, y_offset, 1);
+    window_empire_draw_static_trade_route_by_id((uint32_t)route_object->trade_route_id,
+                                                is_sea_route, x_offset, y_offset, 1);
 }
 
-static void draw_trade_route_pulse_index(int image_id, int x_offset, int y_offset, int route_id, int dot_index)
+static void draw_trade_route_pulse_index(int image_id, int x_offset, int y_offset,
+                                        uint32_t route_key, int dot_index)
 {
-    const trade_route_edge_list *route_list = find_trade_route_edge_list(route_id);
-    if (!image_id || route_id <= 0 || !route_list) {
+    const trade_route_edge_list *route_list = find_trade_route_edge_list(route_key);
+    if (!image_id || route_key == 0 || !route_list) {
         return;
     }
 
@@ -1026,10 +1030,10 @@ static void draw_trade_route_pulse_index(int image_id, int x_offset, int y_offse
     }
 }
 
-static void window_empire_draw_trade_route_pulses_by_id(int route_id, int is_sea_route,
+static void window_empire_draw_trade_route_pulses_by_id(uint32_t route_key, int is_sea_route,
                                                         int x_offset, int y_offset)
 {
-    const trade_route_edge_list *route_list = find_trade_route_edge_list(route_id);
+    const trade_route_edge_list *route_list = find_trade_route_edge_list(route_key);
     if (!route_list) {
         return;
     }
@@ -1055,7 +1059,7 @@ static void window_empire_draw_trade_route_pulses_by_id(int route_id, int is_sea
     int forward_index_from_start = ticks_since_start % dot_count;
 
     int index_from_trade_city = (dot_count - 1) - forward_index_from_start;
-    draw_trade_route_pulse_index(pulse_image_id, x_offset, y_offset, route_id, index_from_trade_city);
+    draw_trade_route_pulse_index(pulse_image_id, x_offset, y_offset, route_key, index_from_trade_city);
 }
 
 // -------------------------------------------------------------------------------------------------------
@@ -1975,6 +1979,7 @@ static void empire_draw_object_trade_route(const empire_object *obj)
 static int draw_multiplayer_trade_route(mp_trade_route_instance *route, void *userdata)
 {
     (void)userdata;
+    uint32_t route_key;
 
     if (!route || !route->is_player_to_player || route->status == MP_TROUTE_DELETED) {
         return 0;
@@ -1982,8 +1987,9 @@ static int draw_multiplayer_trade_route(mp_trade_route_instance *route, void *us
 
     int route_state = mp_ownership_get_route_state(route->claudius_route_id);
     int animate_pulses = (route_state == MP_ROUTE_STATE_ACTIVE);
+    route_key = route->network_route_id ? route->network_route_id : route->instance_id;
     window_empire_draw_static_trade_route_by_id(
-        route->claudius_route_id,
+        route_key,
         route->transport == MP_TROUTE_SEA,
         data.x_draw_offset,
         data.y_draw_offset,

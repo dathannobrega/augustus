@@ -41,8 +41,10 @@ typedef struct {
     /* Connection quality tracking */
     uint32_t last_heartbeat_sent_ms;
     uint32_t last_heartbeat_recv_ms;
+    uint32_t last_heartbeat_sample_id;
     uint32_t rtt_ms;
     uint32_t rtt_smoothed_ms;
+    uint32_t rtt_jitter_ms;
     net_peer_quality quality;
 
     /* Statistics */
@@ -62,9 +64,12 @@ void net_peer_init(net_peer *peer);
 void net_peer_reset(net_peer *peer);
 void net_peer_set_connected(net_peer *peer, int socket_fd, const char *name);
 void net_peer_set_player_id(net_peer *peer, uint8_t player_id);
-void net_peer_update_heartbeat_sent(net_peer *peer, uint32_t timestamp_ms);
-void net_peer_update_heartbeat_recv(net_peer *peer, uint32_t timestamp_ms);
-void net_peer_update_quality(net_peer *peer);
+void net_peer_update_heartbeat_sent(net_peer *peer, uint32_t timestamp_ms,
+                                    uint32_t sample_id);
+void net_peer_note_heartbeat_recv(net_peer *peer, uint32_t timestamp_ms);
+int net_peer_update_heartbeat_response(net_peer *peer, uint32_t timestamp_ms,
+                                       uint32_t sample_id);
+void net_peer_update_quality(net_peer *peer, uint32_t current_ms);
 int net_peer_is_timed_out(const net_peer *peer, uint32_t current_ms);
 const char *net_peer_state_name(net_peer_state state);
 const char *net_peer_quality_name(net_peer_quality quality);

@@ -109,6 +109,8 @@ int mp_trade_route_set_status(uint32_t instance_id, mp_trade_route_status status
 mp_trade_route_instance *mp_trade_route_get(uint32_t instance_id);
 mp_trade_route_instance *mp_trade_route_find_by_endpoints(int origin_city_id, int dest_city_id);
 mp_trade_route_instance *mp_trade_route_find_by_claudius_route(int claudius_route_id);
+mp_trade_route_instance *mp_trade_route_find_by_network_route_id(uint32_t network_route_id);
+mp_trade_route_instance *mp_trade_route_resolve(int claudius_route_id, uint32_t network_route_id);
 int mp_trade_route_count_player_routes(uint8_t player_id);
 int mp_trade_route_count_active(void);
 

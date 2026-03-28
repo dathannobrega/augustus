@@ -4,6 +4,11 @@
 
 #include <string.h>
 
+static uint32_t absolute_delta_u32(uint32_t a, uint32_t b)
+{
+    return (a > b) ? (a - b) : (b - a);
+}
+
 void net_peer_init(net_peer *peer)
 {
     memset(peer, 0, sizeof(net_peer));
@@ -36,35 +41,73 @@ void net_peer_set_player_id(net_peer *peer, uint8_t player_id)
     peer->player_id = player_id;
 }
 
-void net_peer_update_heartbeat_sent(net_peer *peer, uint32_t timestamp_ms)
+void net_peer_update_heartbeat_sent(net_peer *peer, uint32_t timestamp_ms,
+                                    uint32_t sample_id)
 {
     peer->last_heartbeat_sent_ms = timestamp_ms;
+    peer->last_heartbeat_sample_id = sample_id;
 }
 
-void net_peer_update_heartbeat_recv(net_peer *peer, uint32_t timestamp_ms)
+void net_peer_note_heartbeat_recv(net_peer *peer, uint32_t timestamp_ms)
 {
-    if (peer->last_heartbeat_sent_ms > 0 && timestamp_ms >= peer->last_heartbeat_sent_ms) {
-        uint32_t rtt = timestamp_ms - peer->last_heartbeat_sent_ms;
-        if (peer->rtt_smoothed_ms == 0) {
-            peer->rtt_smoothed_ms = rtt;
-        } else {
-            /* Exponential moving average: 7/8 old + 1/8 new */
-            peer->rtt_smoothed_ms = (peer->rtt_smoothed_ms * 7 + rtt) / 8;
-        }
-        peer->rtt_ms = rtt;
-    }
     peer->last_heartbeat_recv_ms = timestamp_ms;
 }
 
-void net_peer_update_quality(net_peer *peer)
+int net_peer_update_heartbeat_response(net_peer *peer, uint32_t timestamp_ms,
+                                       uint32_t sample_id)
 {
+    uint32_t rtt;
+    uint32_t jitter_sample;
+
+    peer->last_heartbeat_recv_ms = timestamp_ms;
+
+    if (peer->last_heartbeat_sample_id == 0 ||
+        sample_id != peer->last_heartbeat_sample_id ||
+        peer->last_heartbeat_sent_ms == 0 ||
+        timestamp_ms < peer->last_heartbeat_sent_ms) {
+        return 0;
+    }
+
+    rtt = timestamp_ms - peer->last_heartbeat_sent_ms;
+    jitter_sample = absolute_delta_u32(rtt, peer->rtt_ms);
+
     if (peer->rtt_smoothed_ms == 0) {
+        peer->rtt_smoothed_ms = rtt;
+    } else {
+        /* Exponential moving average: 7/8 old + 1/8 new */
+        peer->rtt_smoothed_ms = (peer->rtt_smoothed_ms * 7 + rtt) / 8;
+    }
+    if (peer->rtt_jitter_ms == 0) {
+        peer->rtt_jitter_ms = jitter_sample;
+    } else {
+        peer->rtt_jitter_ms = (peer->rtt_jitter_ms * 3 + jitter_sample) / 4;
+    }
+    peer->rtt_ms = rtt;
+    return 1;
+}
+
+void net_peer_update_quality(net_peer *peer, uint32_t current_ms)
+{
+    uint32_t heartbeat_gap = 0;
+
+    if (peer->last_heartbeat_recv_ms > 0 && current_ms >= peer->last_heartbeat_recv_ms) {
+        heartbeat_gap = current_ms - peer->last_heartbeat_recv_ms;
+    }
+
+    if (heartbeat_gap > NET_TIMEOUT_MS) {
+        peer->quality = PEER_QUALITY_CRITICAL;
+    } else if (peer->rtt_smoothed_ms == 0) {
         peer->quality = PEER_QUALITY_UNKNOWN;
-    } else if (peer->rtt_smoothed_ms < 50) {
+    } else if (peer->rtt_smoothed_ms < 80 &&
+               peer->rtt_jitter_ms < 25 &&
+               heartbeat_gap <= NET_HEARTBEAT_INTERVAL_MS * 2) {
         peer->quality = PEER_QUALITY_GOOD;
-    } else if (peer->rtt_smoothed_ms < 150) {
+    } else if (peer->rtt_smoothed_ms < 180 &&
+               peer->rtt_jitter_ms < 80 &&
+               heartbeat_gap <= NET_HEARTBEAT_INTERVAL_MS * 3) {
         peer->quality = PEER_QUALITY_DEGRADED;
-    } else if (peer->rtt_smoothed_ms < 400) {
+    } else if (peer->rtt_smoothed_ms < 450 &&
+               heartbeat_gap <= NET_TIMEOUT_MS) {
         peer->quality = PEER_QUALITY_POOR;
     } else {
         peer->quality = PEER_QUALITY_CRITICAL;

@@ -25,6 +25,12 @@
 
 #include <string.h>
 
+static mp_trade_route_instance *resolve_empire_route(int route_id,
+                                                     uint32_t network_route_id)
+{
+    return mp_trade_route_resolve(route_id, network_route_id);
+}
+
 static struct {
     mp_city_trade_view views[MP_MAX_TRADE_VIEW_CITIES];
     int view_count;
@@ -371,7 +377,7 @@ static void handle_route_lifecycle_event(uint16_t event_type, net_serializer *s)
             mp_ownership_delete_route(route_id);
             trade_route_clear_player_binding(route_id);
             {
-                mp_trade_route_instance *mpr = mp_trade_route_find_by_claudius_route(route_id);
+                mp_trade_route_instance *mpr = resolve_empire_route(route_id, network_route_id);
                 if (mpr) {
                     mp_trade_route_delete(mpr->instance_id);
                 }
@@ -389,7 +395,7 @@ static void handle_route_lifecycle_event(uint16_t event_type, net_serializer *s)
             uint32_t network_route_id = net_read_u32(s);
             mp_ownership_set_route_state(route_id, MP_ROUTE_STATE_ACTIVE);
             {
-                mp_trade_route_instance *mpr = mp_trade_route_find_by_claudius_route(route_id);
+                mp_trade_route_instance *mpr = resolve_empire_route(route_id, network_route_id);
                 if (mpr) {
                     mpr->status = MP_TROUTE_ACTIVE;
                 }
@@ -407,7 +413,7 @@ static void handle_route_lifecycle_event(uint16_t event_type, net_serializer *s)
             uint32_t network_route_id = net_read_u32(s);
             mp_ownership_set_route_state(route_id, MP_ROUTE_STATE_DISABLED);
             {
-                mp_trade_route_instance *mpr = mp_trade_route_find_by_claudius_route(route_id);
+                mp_trade_route_instance *mpr = resolve_empire_route(route_id, network_route_id);
                 if (mpr) {
                     mpr->status = MP_TROUTE_DISABLED;
                 }
@@ -585,11 +591,12 @@ void multiplayer_empire_sync_receive_event(const uint8_t *data, uint32_t size)
         /* Route policy events */
         case NET_EVENT_ROUTE_POLICY_SET: {
             int route_id = net_read_i32(&s);
+            uint32_t network_route_id = net_read_u32(&s);
             int resource = net_read_i32(&s);
             uint8_t is_export = net_read_u8(&s);
             uint8_t enabled = net_read_u8(&s);
             if (trade_route_is_valid(route_id) && resource >= 0 && resource < RESOURCE_MAX) {
-                mp_trade_route_instance *mpr = mp_trade_route_find_by_claudius_route(route_id);
+                mp_trade_route_instance *mpr = resolve_empire_route(route_id, network_route_id);
                 if (is_export) {
                     trade_route_set_export_enabled(route_id, resource, enabled);
                     if (mpr) {
@@ -610,11 +617,12 @@ void multiplayer_empire_sync_receive_event(const uint8_t *data, uint32_t size)
 
         case NET_EVENT_ROUTE_LIMIT_SET: {
             int route_id = net_read_i32(&s);
+            uint32_t network_route_id = net_read_u32(&s);
             int resource = net_read_i32(&s);
             uint8_t is_buying = net_read_u8(&s);
             int amount = net_read_i32(&s);
             if (trade_route_is_valid(route_id) && resource >= 0 && resource < RESOURCE_MAX) {
-                mp_trade_route_instance *mpr = mp_trade_route_find_by_claudius_route(route_id);
+                mp_trade_route_instance *mpr = resolve_empire_route(route_id, network_route_id);
                 trade_route_set_limit(route_id, resource, amount, is_buying);
                 if (mpr) {
                     if (is_buying) {
@@ -665,7 +673,7 @@ void multiplayer_empire_sync_receive_event(const uint8_t *data, uint32_t size)
         }
 
         /* Trade policy changed (full route state broadcast) */
-        case NET_EVENT_TRADE_POLICY_CHANGED: {
+        case NET_EVENT_ROUTE_STATE_SYNC: {
             uint32_t pos = (uint32_t)net_serializer_position(&s);
             if (pos < size) {
                 mp_trade_sync_handle_event(event_type, data + pos, size - pos);

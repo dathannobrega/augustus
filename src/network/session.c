@@ -36,6 +36,7 @@ static net_join_status join_status;
 static uint8_t join_reject_reason;
 static uint32_t join_start_ms;
 static uint32_t join_correlation_id; /* Unique ID per join attempt for log correlation */
+static uint32_t heartbeat_sample_counter;
 
 #define NET_JOIN_TIMEOUT_MS 10000 /* 10 seconds to complete handshake */
 
@@ -103,6 +104,17 @@ static void copy_current_world_uuid(uint8_t *out_uuid)
 static uint32_t current_resume_generation(void)
 {
     return session.session_id;
+}
+
+static int should_clear_persisted_identity(net_join_status preserved_join_status,
+                                           uint8_t preserved_reject_reason)
+{
+    if (preserved_join_status != NET_JOIN_STATUS_REJECTED) {
+        return 0;
+    }
+
+    return preserved_reject_reason == NET_REJECT_WORLD_MISMATCH ||
+           preserved_reject_reason == NET_REJECT_RESUME_GENERATION_MISMATCH;
 }
 
 static int has_reconnectable_player(void)
@@ -320,6 +332,7 @@ static void handle_peer_disconnect(int peer_index)
     }
 
     close_peer(peer_index);
+    net_session_refresh_discovery_announcement();
 
     if (session.state == NET_SESSION_HOSTING_LOBBY) {
         broadcast_lobby_snapshot();
@@ -358,6 +371,63 @@ static void send_raw_to_peer(net_peer *peer, uint16_t message_type,
     }
     peer->bytes_sent += sent;
     peer->packets_sent++;
+}
+
+static uint32_t next_heartbeat_sample_id(void)
+{
+    heartbeat_sample_counter++;
+    if (heartbeat_sample_counter == 0) {
+        heartbeat_sample_counter = 1;
+    }
+    return heartbeat_sample_counter;
+}
+
+static int parse_heartbeat_payload(const uint8_t *payload, uint32_t size,
+                                   net_msg_heartbeat *out)
+{
+    net_serializer s;
+
+    if (!payload || !out || size < (uint32_t)(sizeof(uint32_t) * 2 + sizeof(uint8_t))) {
+        return 0;
+    }
+
+    net_serializer_init(&s, (uint8_t *)payload, size);
+    out->timestamp_ms = net_read_u32(&s);
+    out->sample_id = net_read_u32(&s);
+    out->flags = net_read_u8(&s);
+    return !net_serializer_has_overflow(&s);
+}
+
+static void send_heartbeat_to_peer(net_peer *peer, uint32_t timestamp_ms,
+                                   uint32_t sample_id, uint8_t flags)
+{
+    uint8_t hb_buf[16];
+    net_serializer hs;
+
+    if (!peer || !peer->active) {
+        return;
+    }
+
+    net_serializer_init(&hs, hb_buf, sizeof(hb_buf));
+    net_write_u32(&hs, timestamp_ms);
+    net_write_u32(&hs, sample_id);
+    net_write_u8(&hs, flags);
+    send_raw_to_peer(peer, NET_MSG_HEARTBEAT, hb_buf,
+                     (uint32_t)net_serializer_position(&hs));
+}
+
+static void send_heartbeat_to_host(uint32_t timestamp_ms,
+                                   uint32_t sample_id, uint8_t flags)
+{
+    uint8_t hb_buf[16];
+    net_serializer hs;
+
+    net_serializer_init(&hs, hb_buf, sizeof(hb_buf));
+    net_write_u32(&hs, timestamp_ms);
+    net_write_u32(&hs, sample_id);
+    net_write_u8(&hs, flags);
+    net_session_send_to_host(NET_MSG_HEARTBEAT, hb_buf,
+                             (uint32_t)net_serializer_position(&hs));
 }
 
 static void send_join_accept_to_peer(net_peer *peer, uint8_t player_id, uint8_t slot_id,
@@ -1169,15 +1239,20 @@ static void handle_client_message(net_peer *peer, const net_packet_header *heade
             break;
         }
         case NET_MSG_HEARTBEAT: {
+            net_msg_heartbeat heartbeat;
             uint32_t now = net_tcp_get_timestamp_ms();
-            net_peer_update_heartbeat_recv(peer, now);
-            net_peer_update_quality(peer);
-            /* Echo heartbeat back */
-            uint8_t hb_buf[4];
-            net_serializer hs;
-            net_serializer_init(&hs, hb_buf, sizeof(hb_buf));
-            net_write_u32(&hs, now);
-            send_raw_to_peer(peer, NET_MSG_HEARTBEAT, hb_buf, 4);
+            if (!parse_heartbeat_payload(payload, size, &heartbeat)) {
+                log_error("Malformed heartbeat from client", peer->name, (int)size);
+                break;
+            }
+            if (heartbeat.flags & NET_HEARTBEAT_FLAG_RESPONSE) {
+                net_peer_update_heartbeat_response(peer, now, heartbeat.sample_id);
+            } else {
+                net_peer_note_heartbeat_recv(peer, now);
+                send_heartbeat_to_peer(peer, heartbeat.timestamp_ms, heartbeat.sample_id,
+                                       NET_HEARTBEAT_FLAG_RESPONSE);
+            }
+            net_peer_update_quality(peer, now);
             break;
         }
         case NET_MSG_CHECKSUM_RESPONSE: {
@@ -1413,6 +1488,10 @@ static void handle_host_message(const net_packet_header *header,
                              join_correlation_id, reason_str, (int)reason);
                 log_error("Join rejected", reason_str, reason);
                 join_reject_reason = reason;
+                if (reason == NET_REJECT_WORLD_MISMATCH ||
+                    reason == NET_REJECT_RESUME_GENERATION_MISMATCH) {
+                    mp_client_identity_clear();
+                }
             }
             join_status = NET_JOIN_STATUS_REJECTED;
             session.state = NET_SESSION_DISCONNECTING;
@@ -1471,9 +1550,21 @@ static void handle_host_message(const net_packet_header *header,
             break;
         }
         case NET_MSG_HEARTBEAT: {
+            net_msg_heartbeat heartbeat;
             uint32_t now = net_tcp_get_timestamp_ms();
-            net_peer_update_heartbeat_recv(&session.host_peer, now);
-            net_peer_update_quality(&session.host_peer);
+            if (!parse_heartbeat_payload(payload, size, &heartbeat)) {
+                log_error("Malformed heartbeat from host", 0, (int)size);
+                break;
+            }
+            if (heartbeat.flags & NET_HEARTBEAT_FLAG_RESPONSE) {
+                net_peer_update_heartbeat_response(&session.host_peer, now,
+                                                   heartbeat.sample_id);
+            } else {
+                net_peer_note_heartbeat_recv(&session.host_peer, now);
+                send_heartbeat_to_host(heartbeat.timestamp_ms, heartbeat.sample_id,
+                                       NET_HEARTBEAT_FLAG_RESPONSE);
+            }
+            net_peer_update_quality(&session.host_peer, now);
             break;
         }
         case NET_MSG_DISCONNECT_NOTICE: {
@@ -1625,13 +1716,11 @@ static void host_process_peers(void)
 
         /* Send heartbeats periodically */
         if (now - peer->last_heartbeat_sent_ms > NET_HEARTBEAT_INTERVAL_MS) {
-            uint8_t hb_buf[4];
-            net_serializer hs;
-            net_serializer_init(&hs, hb_buf, sizeof(hb_buf));
-            net_write_u32(&hs, now);
-            send_raw_to_peer(peer, NET_MSG_HEARTBEAT, hb_buf, 4);
-            net_peer_update_heartbeat_sent(peer, now);
+            uint32_t sample_id = next_heartbeat_sample_id();
+            send_heartbeat_to_peer(peer, now, sample_id, 0);
+            net_peer_update_heartbeat_sent(peer, now, sample_id);
         }
+        net_peer_update_quality(peer, now);
     }
 
     /* Periodic cleanup of expired reconnect slots */
@@ -1697,13 +1786,11 @@ static void client_process_host(void)
 
     /* Send heartbeats */
     if (now - peer->last_heartbeat_sent_ms > NET_HEARTBEAT_INTERVAL_MS) {
-        uint8_t hb_buf[4];
-        net_serializer hs;
-        net_serializer_init(&hs, hb_buf, sizeof(hb_buf));
-        net_write_u32(&hs, now);
-        net_session_send_to_host(NET_MSG_HEARTBEAT, hb_buf, 4);
-        net_peer_update_heartbeat_sent(peer, now);
+        uint32_t sample_id = next_heartbeat_sample_id();
+        send_heartbeat_to_host(now, sample_id, 0);
+        net_peer_update_heartbeat_sent(peer, now, sample_id);
     }
+    net_peer_update_quality(peer, now);
 }
 
 /* ---- Public API ---- */
@@ -1717,6 +1804,7 @@ int net_session_init(void)
     join_status = NET_JOIN_STATUS_NONE;
     join_reject_reason = 0;
     join_start_ms = 0;
+    heartbeat_sample_counter = 0;
     session.listen_fd = -1;
     session.udp_fd = -1;
 
@@ -1935,6 +2023,7 @@ void net_session_disconnect(void)
 {
     net_join_status preserved_join_status = NET_JOIN_STATUS_NONE;
     uint8_t preserved_reject_reason = 0;
+    int clear_identity = 0;
 
     if (join_status == NET_JOIN_STATUS_REJECTED ||
         join_status == NET_JOIN_STATUS_TIMEOUT ||
@@ -1942,6 +2031,8 @@ void net_session_disconnect(void)
         preserved_join_status = join_status;
         preserved_reject_reason = join_reject_reason;
     }
+    clear_identity = should_clear_persisted_identity(preserved_join_status,
+                                                     preserved_reject_reason);
 
     if (session.state == NET_SESSION_IDLE) {
         return;
@@ -2001,8 +2092,7 @@ void net_session_disconnect(void)
     memset(&chat_history, 0, sizeof(chat_history));
     mp_player_registry_clear();
 
-    /* Clear persisted identity only on real session teardown, not failed joins. */
-    if (preserved_join_status == NET_JOIN_STATUS_NONE) {
+    if (clear_identity) {
         mp_client_identity_clear();
     }
 

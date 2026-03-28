@@ -36,12 +36,57 @@ static mp_trade_route_instance *alloc_route(void)
     return 0;
 }
 
+static int route_aliases_are_valid(uint32_t requested_instance_id,
+                                   int claudius_route_id,
+                                   uint32_t network_route_id,
+                                   int is_player_to_player)
+{
+    for (int i = 0; i < MP_TRADE_ROUTE_MAX; i++) {
+        mp_trade_route_instance *existing = &route_data.routes[i];
+        if (!existing->in_use) {
+            continue;
+        }
+        if (requested_instance_id != MP_TRADE_ROUTE_INVALID_ID &&
+            existing->instance_id == requested_instance_id) {
+            MP_LOG_ERROR("MP_TRADE_ROUTE",
+                         "Duplicate instance_id requested: %u",
+                         requested_instance_id);
+            return 0;
+        }
+        if (network_route_id != 0 && existing->network_route_id == network_route_id) {
+            MP_LOG_ERROR("MP_TRADE_ROUTE",
+                         "Duplicate network_route_id detected: %u (existing instance=%u)",
+                         network_route_id, existing->instance_id);
+            return 0;
+        }
+        if (is_player_to_player &&
+            existing->is_player_to_player &&
+            claudius_route_id > 0 &&
+            existing->claudius_route_id == claudius_route_id) {
+            MP_LOG_WARN("MP_TRADE_ROUTE",
+                        "P2P routes sharing legacy claudius_route_id=%d "
+                        "(existing instance=%u, network_route_id=%u)",
+                        claudius_route_id,
+                        existing->instance_id,
+                        existing->network_route_id);
+        }
+    }
+    return 1;
+}
+
 static uint32_t create_route_internal(uint32_t requested_instance_id,
                                       uint8_t origin_player_id, int origin_city_id,
                                       uint8_t dest_player_id, int dest_city_id,
                                       int claudius_route_id, uint32_t network_route_id,
                                       mp_trade_route_transport transport)
 {
+    int is_player_to_player = (dest_player_id != 0xFF) ? 1 : 0;
+
+    if (!route_aliases_are_valid(requested_instance_id, claudius_route_id,
+                                 network_route_id, is_player_to_player)) {
+        return MP_TRADE_ROUTE_INVALID_ID;
+    }
+
     mp_trade_route_instance *r = alloc_route();
     if (!r) {
         MP_LOG_ERROR("MP_TRADE_ROUTE", "Route table full (max %d)", MP_TRADE_ROUTE_MAX);
@@ -60,7 +105,7 @@ static uint32_t create_route_internal(uint32_t requested_instance_id,
     r->dest_player_id = dest_player_id;
     r->dest_city_id = dest_city_id;
     r->claudius_route_id = claudius_route_id;
-    r->is_player_to_player = (dest_player_id != 0xFF) ? 1 : 0;
+    r->is_player_to_player = is_player_to_player;
     r->transport = transport;
     r->status = MP_TROUTE_ACTIVE;
     r->state_version = 1;
@@ -163,6 +208,31 @@ mp_trade_route_instance *mp_trade_route_find_by_claudius_route(int claudius_rout
         }
     }
     return 0;
+}
+
+mp_trade_route_instance *mp_trade_route_find_by_network_route_id(uint32_t network_route_id)
+{
+    if (network_route_id == 0) {
+        return 0;
+    }
+    for (int i = 0; i < MP_TRADE_ROUTE_MAX; i++) {
+        mp_trade_route_instance *r = &route_data.routes[i];
+        if (r->in_use && r->network_route_id == network_route_id) {
+            return r;
+        }
+    }
+    return 0;
+}
+
+mp_trade_route_instance *mp_trade_route_resolve(int claudius_route_id,
+                                                uint32_t network_route_id)
+{
+    mp_trade_route_instance *route =
+        mp_trade_route_find_by_network_route_id(network_route_id);
+    if (route) {
+        return route;
+    }
+    return mp_trade_route_find_by_claudius_route(claudius_route_id);
 }
 
 int mp_trade_route_count_player_routes(uint8_t player_id)

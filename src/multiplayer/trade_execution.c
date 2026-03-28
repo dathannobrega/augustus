@@ -25,6 +25,17 @@
 
 #include <string.h>
 
+static int broadcast_route_state_after_year_change(mp_trade_route_instance *route,
+                                                   void *userdata)
+{
+    (void)userdata;
+    if (!route || route->status == MP_TROUTE_DELETED || route->claudius_route_id <= 0) {
+        return 0;
+    }
+    mp_trade_sync_broadcast_route_state(route->claudius_route_id);
+    return 0;
+}
+
 static struct {
     uint32_t next_transaction_id;
     mp_trade_transaction last_transaction;
@@ -480,26 +491,7 @@ void mp_trade_execution_on_year_change(void)
     /* Only host resets and broadcasts */
     if (net_session_is_host()) {
         mp_trade_route_reset_annual_counters();
-
-        /* Broadcast the route snapshot so clients get the reset state */
-        uint8_t buf[8192];
-        uint32_t size = 0;
-        mp_trade_route_serialize(buf, &size, sizeof(buf));
-
-        if (size > 0) {
-            uint8_t event_buf[8200];
-            net_serializer s;
-            net_serializer_init(&s, event_buf, sizeof(event_buf));
-            net_write_u16(&s, NET_EVENT_TRADE_POLICY_CHANGED);
-            net_write_u32(&s, net_session_get_authoritative_tick());
-            net_write_u32(&s, size);
-            /* Copy serialized route data after header */
-            uint32_t header_size = (uint32_t)net_serializer_position(&s);
-            if (header_size + size <= sizeof(event_buf)) {
-                memcpy(event_buf + header_size, buf, size);
-                net_session_broadcast(NET_MSG_HOST_EVENT, event_buf, header_size + size);
-            }
-        }
+        mp_trade_route_foreach_active(broadcast_route_state_after_year_change, 0);
 
         MP_LOG_INFO("TRADE_EXEC", "Year change: annual trade counters reset and broadcast");
     }

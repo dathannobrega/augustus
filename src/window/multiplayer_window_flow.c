@@ -3,6 +3,7 @@
 #include "multiplayer_window_flow.h"
 
 #include "graphics/window.h"
+#include "multiplayer/mp_autosave.h"
 #include "multiplayer/bootstrap.h"
 #include "multiplayer/player_registry.h"
 #include "multiplayer/save_transfer.h"
@@ -24,6 +25,9 @@ void window_multiplayer_reset_session_state(void)
 
 void window_multiplayer_exit_to_menu(void)
 {
+    if (net_session_is_host() && net_session_is_in_game()) {
+        mp_autosave_final_save();
+    }
     window_multiplayer_reset_session_state();
     if (!window_go_back_to(WINDOW_MULTIPLAYER_MENU)) {
         window_multiplayer_menu_show();
