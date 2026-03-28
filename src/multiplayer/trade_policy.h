@@ -77,10 +77,12 @@ void mp_trade_policy_force_view_update(uint8_t player_id);
  * this player is trading, not just subsequent changes.
  */
 void mp_trade_policy_send_all_settings(void);
+void mp_trade_policy_update_local_runtime_state(void);
 
 #define MP_TRADE_SETTING_EXPORT  0
 #define MP_TRADE_SETTING_IMPORT  1
 #define MP_TRADE_SETTING_STOCKPILE 2
+#define MP_TRADE_SETTING_DOCK_AVAILABLE 3
 
 #endif /* ENABLE_MULTIPLAYER */
 

@@ -12,10 +12,13 @@
 #include "building/granary.h"
 #include "building/warehouse.h"
 #include "figure/figure.h"
+#include "figure/type.h"
 #include "empire/city.h"
+#include "empire/trade_prices.h"
 #include "empire/trade_route.h"
 #include "figure/figure.h"
 #include "figure/trader.h"
+#include "city/finance.h"
 #include "city/health.h"
 #include "game/resource.h"
 #include "core/log.h"
@@ -50,6 +53,72 @@ static struct {
     int trader_count;
     uint32_t next_network_entity_id;
 } trade_data;
+
+static mp_trade_route_instance *resolve_trade_event_route(uint32_t route_instance_id,
+                                                          int fallback_route_id)
+{
+    mp_trade_route_instance *mpr = 0;
+
+    if (route_instance_id > 0) {
+        mpr = mp_trade_route_get(route_instance_id);
+    }
+    if (!mpr && fallback_route_id >= 0) {
+        mpr = mp_trade_route_find_by_claudius_route(fallback_route_id);
+    }
+    return mpr;
+}
+
+static void apply_trade_event_storage_mutation(int building_id, int resource,
+                                               int amount, int buying,
+                                               int trader_type)
+{
+    building *b;
+    int applied = 0;
+    int price;
+
+    if (building_id <= 0 || amount <= 0 ||
+        resource < RESOURCE_MIN || resource >= RESOURCE_MAX) {
+        return;
+    }
+
+    b = building_get(building_id);
+    if (!b || b->state != BUILDING_STATE_IN_USE) {
+        return;
+    }
+
+    if (buying) {
+        if (b->type == BUILDING_GRANARY) {
+            applied = building_granary_try_remove_resource(b, resource, amount);
+        } else if (b->type == BUILDING_WAREHOUSE) {
+            applied = building_warehouse_try_remove_resource(b, resource, amount);
+        }
+        if (applied > 0) {
+            price = trade_price_sell(resource, trader_type);
+            city_finance_process_export(price * applied);
+        }
+    } else {
+        if (b->type == BUILDING_GRANARY) {
+            applied = building_granary_try_add_resource(b, resource, amount, 0, 0);
+        } else if (b->type == BUILDING_WAREHOUSE) {
+            applied = building_warehouse_try_add_resource(b, resource, amount, 0);
+        }
+        if (applied > 0) {
+            price = trade_price_buy(resource, trader_type);
+            city_finance_process_import(price * applied);
+        }
+    }
+
+    if (applied > 0) {
+        city_health_update_sickness_level_in_building(building_id);
+        if (applied != amount) {
+            MP_LOG_WARN("TRADE_SYNC", "Client replay applied %d/%d units for building %d resource %d",
+                        applied, amount, building_id, resource);
+        }
+    } else {
+        MP_LOG_WARN("TRADE_SYNC", "Client replay could not apply trade mutation for building %d resource %d amount %d",
+                    building_id, resource, amount);
+    }
+}
 
 void mp_trade_sync_init(void)
 {
@@ -457,42 +526,42 @@ void mp_trade_sync_handle_event(uint16_t event_type,
             /* Client applies the trade result from host */
             replicated_trader *t = find_trader(figure_id);
             int route_id = t ? t->route_id : mp_ownership_get_trader_route(figure_id);
+            mp_trade_route_instance *mpr = resolve_trade_event_route(route_instance_id, route_id);
+            int trader_type = 0;
+            int applied_amount = amount > 0 ? amount : 1;
+            if (mpr) {
+                trader_type = (mpr->transport == MP_TROUTE_LAND) ? 1 : 0;
+            } else {
+                figure *trade_figure = figure_get(figure_id);
+                if (trade_figure &&
+                    (trade_figure->type == FIGURE_TRADE_CARAVAN ||
+                     trade_figure->type == FIGURE_TRADE_CARAVAN_DONKEY ||
+                     trade_figure->type == FIGURE_NATIVE_TRADER)) {
+                    trader_type = 1;
+                }
+            }
+            if (mpr && route_id < 0) {
+                route_id = mpr->claudius_route_id;
+            }
             if (trade_route_is_valid(route_id) && resource >= RESOURCE_MIN && resource < RESOURCE_MAX) {
-                trade_route_increase_traded(route_id, resource, buying);
+                for (int i = 0; i < applied_amount; i++) {
+                    trade_route_increase_traded(route_id, resource, buying);
+                }
             }
             /* Update mp_trade_route_instance counters on client */
-            if (route_instance_id > 0) {
+            if (mpr) {
                 if (buying) {
-                    mp_trade_route_record_import(route_instance_id, resource, amount);
+                    mp_trade_route_record_import(mpr->instance_id, resource, applied_amount);
                 } else {
-                    mp_trade_route_record_export(route_instance_id, resource, amount);
+                    mp_trade_route_record_export(mpr->instance_id, resource, applied_amount);
                 }
             }
 
             /* Apply warehouse/granary mutation on client so stock stays in sync.
              * This is the ONLY place clients apply warehouse mutations for trades —
              * trader_get_buy/sell_resource() is gated behind is_auth in trader.c. */
-            if (building_id > 0) {
-                building *b = building_get(building_id);
-                if (b && b->state == BUILDING_STATE_IN_USE) {
-                    if (buying) {
-                        /* Trader buying = city exporting = remove from warehouse */
-                        if (b->type == BUILDING_GRANARY) {
-                            building_granary_remove_export(b, resource, amount, 0);
-                        } else if (b->type == BUILDING_WAREHOUSE) {
-                            building_warehouse_remove_export(b, resource, amount, 0);
-                        }
-                    } else {
-                        /* Trader selling = city importing = add to warehouse */
-                        if (b->type == BUILDING_GRANARY) {
-                            building_granary_add_import(b, resource, amount, 0);
-                        } else if (b->type == BUILDING_WAREHOUSE) {
-                            building_warehouse_add_import(b, resource, amount, 0);
-                        }
-                    }
-                    city_health_update_sickness_level_in_building(building_id);
-                }
-            }
+            apply_trade_event_storage_mutation(building_id, resource, applied_amount,
+                                               buying, trader_type);
 
             /* Sync figure state so client's trader knows when to stop trading.
              * Without this, figure_trade_caravan_can_buy/sell never returns false
@@ -500,19 +569,21 @@ void mp_trade_sync_handle_event(uint16_t event_type,
             if (figure_id > 0) {
                 figure *f = figure_get(figure_id);
                 if (f && f->state == FIGURE_STATE_ALIVE) {
-                    if (buying) {
-                        f->trader_amount_bought++;
-                        trader_record_bought_resource(f->trader_id, resource);
-                    } else {
-                        f->loads_sold_or_carrying++;
-                        trader_record_sold_resource(f->trader_id, resource);
+                    for (int i = 0; i < applied_amount; i++) {
+                        if (buying) {
+                            f->trader_amount_bought++;
+                            trader_record_bought_resource(f->trader_id, resource);
+                        } else {
+                            f->loads_sold_or_carrying++;
+                            trader_record_sold_resource(f->trader_id, resource);
+                        }
                     }
                 }
             }
 
             if (t) {
                 t->last_resource = resource;
-                t->last_amount = amount;
+                t->last_amount = applied_amount;
                 t->state_version = version;
             }
             (void)net_id;
@@ -558,6 +629,9 @@ void mp_trade_sync_handle_event(uint16_t event_type,
             int route_id = net_read_i32(&s);
             uint32_t route_instance_id = net_read_u32(&s);
             mp_trade_route_instance *mpr = mp_trade_route_get(route_instance_id);
+            if (!trade_route_is_valid(route_id) && mpr) {
+                route_id = mpr->claudius_route_id;
+            }
             if (trade_route_is_valid(route_id)) {
                 for (int r = RESOURCE_MIN; r < RESOURCE_MAX; r++) {
                     int buy_limit = net_read_i32(&s);
@@ -572,8 +646,8 @@ void mp_trade_sync_handle_event(uint16_t event_type,
                     int imported_this_year = net_read_i32(&s);
                     trade_route_set_limit(route_id, r, buy_limit, 0);
                     trade_route_set_limit(route_id, r, sell_limit, 1);
-                    (void)buy_traded;
-                    (void)sell_traded;
+                    trade_route_set_traded(route_id, r, buy_traded, 0);
+                    trade_route_set_traded(route_id, r, sell_traded, 1);
                     if (mpr) {
                         mpr->resources[r].export_enabled = export_enabled;
                         mpr->resources[r].import_enabled = import_enabled;
@@ -655,9 +729,9 @@ void mp_trade_sync_deserialize_routes(const uint8_t *buffer, uint32_t size)
             if (trade_route_is_valid(i)) {
                 trade_route_set_limit(i, r, buy_limit, 0);
                 trade_route_set_limit(i, r, sell_limit, 1);
+                trade_route_set_traded(i, r, buy_traded, 0);
+                trade_route_set_traded(i, r, sell_traded, 1);
             }
-            (void)buy_traded;
-            (void)sell_traded;
         }
     }
 }

@@ -71,6 +71,16 @@ int city_finance_treasury(void)
     return city_data.finance.treasury;
 }
 
+void city_finance_apply_starting_state(int treasury, int tax_percentage)
+{
+    city_data.finance.treasury = treasury;
+    city_data.finance.tax_percentage = calc_bound(tax_percentage, 0, 25);
+    city_data.finance.last_year.balance = treasury;
+    city_data.finance.this_year.balance = treasury;
+    city_data.finance.last_year.net_in_out = 0;
+    city_data.finance.this_year.net_in_out = 0;
+}
+
 void city_finance_treasury_add(int amount)
 {
     city_data.finance.treasury += amount;

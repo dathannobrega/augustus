@@ -47,6 +47,7 @@ void mp_empire_sync_broadcast_views(void);
 /* Query trade views */
 const mp_city_trade_view *mp_empire_sync_get_trade_view(int city_id);
 int mp_empire_sync_get_city_id_for_player(uint8_t player_id);
+void mp_empire_sync_set_city_dock_available(int city_id, int available);
 
 /* Check if a resource can be exported/imported for a remote player city */
 int mp_empire_sync_can_export_to_remote(int city_id, int resource);

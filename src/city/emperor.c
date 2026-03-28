@@ -373,6 +373,11 @@ int city_emperor_personal_savings(void)
     return city_data.emperor.personal_savings;
 }
 
+void city_emperor_set_personal_savings(int amount)
+{
+    city_data.emperor.personal_savings = calc_max(amount, 0);
+}
+
 void city_emperor_add_personal_savings(int amount)
 {
     city_data.emperor.personal_savings += amount;

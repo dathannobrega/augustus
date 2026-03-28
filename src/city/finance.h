@@ -32,6 +32,7 @@ typedef struct {
 } tourism_for_type;
 
 int city_finance_treasury(void);
+void city_finance_apply_starting_state(int treasury, int tax_percentage);
 
 void city_finance_treasury_add(int amount);
 

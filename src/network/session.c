@@ -157,7 +157,7 @@ static net_discovery_join_policy current_discovery_join_policy(void)
     }
 
     if (session.state == NET_SESSION_HOSTING_GAME) {
-        if (mp_bootstrap_is_late_join_busy()) {
+        if (mp_bootstrap_is_late_join_busy() || mp_bootstrap_is_reconnect_busy()) {
             return NET_DISCOVERY_JOIN_CLOSED;
         }
         if (mp_worldgen_get_reserved_count() > 0) {
@@ -293,6 +293,7 @@ static void handle_peer_disconnect(int peer_index)
     {
         mp_join_transaction *txn = mp_join_transaction_find_by_peer((uint8_t)peer_index);
         extern void mp_bootstrap_host_cancel_late_join(uint8_t peer_index);
+        extern void mp_bootstrap_host_cancel_reconnect(uint8_t peer_index);
         if (txn && txn->active) {
             MP_LOG_INFO("SESSION", "Peer %d disconnected during join — rolling back transaction",
                         peer_index);
@@ -301,6 +302,7 @@ static void handle_peer_disconnect(int peer_index)
             close_peer(peer_index);
             return;
         }
+        mp_bootstrap_host_cancel_reconnect((uint8_t)peer_index);
     }
 
     player_id = peer->player_id;
@@ -531,11 +533,11 @@ static int try_reconnect_player(net_peer *peer, const uint8_t *uuid,
         mp_ownership_set_city_online(existing->assigned_city_id, 1);
     }
 
-    /* Update peer state */
+    /* Update peer identity */
     strncpy(peer->name, existing->name, NET_MAX_PLAYER_NAME - 1);
     peer->name[NET_MAX_PLAYER_NAME - 1] = '\0';
     net_peer_set_player_id(peer, old_player_id);
-    peer->state = PEER_STATE_IN_GAME;
+    peer->state = PEER_STATE_JOINED;
 
     log_info("Player reconnected", existing->name, (int)old_player_id);
 
@@ -543,6 +545,24 @@ static int try_reconnect_player(net_peer *peer, const uint8_t *uuid,
                              existing->player_uuid, existing->reconnect_token,
                              (uint8_t)mp_player_registry_get_count(),
                              mp_worldgen_get_spawn_table_mutable()->session_seed);
+
+    {
+        extern int mp_bootstrap_host_begin_reconnect(uint8_t peer_index, uint8_t player_id);
+        if (mp_bootstrap_host_begin_reconnect((uint8_t)peer_index, old_player_id)) {
+            uint8_t event_buf[32];
+            net_serializer es;
+            net_serializer_init(&es, event_buf, sizeof(event_buf));
+            net_write_u16(&es, NET_EVENT_PLAYER_RECONNECTED);
+            net_write_u32(&es, session.authoritative_tick);
+            net_write_u8(&es, old_player_id);
+            net_session_broadcast_in_game(NET_MSG_HOST_EVENT, event_buf,
+                                          (uint32_t)net_serializer_position(&es));
+            net_session_refresh_discovery_announcement();
+            return 1;
+        }
+    }
+
+    peer->state = PEER_STATE_IN_GAME;
 
     {
         uint8_t event_buf[32];
@@ -1288,6 +1308,7 @@ static void handle_client_message(net_peer *peer, const net_packet_header *heade
             /* If this peer was in LOADING state (join barrier active),
              * transition to IN_GAME and release the barrier */
             if (peer->state == PEER_STATE_LOADING) {
+                extern void mp_bootstrap_host_complete_reconnect(uint8_t peer_index);
                 peer->state = PEER_STATE_IN_GAME;
                 mp_player_registry_set_status(peer->player_id, MP_PLAYER_IN_GAME);
 
@@ -1296,25 +1317,25 @@ static void handle_client_message(net_peer *peer, const net_packet_header *heade
                     (uint8_t)(peer - session.peers));
                 if (txn && txn->active) {
                     mp_join_transaction_commit(txn);
+                    broadcast_full_snapshot_to_in_game_peers();
+
+                    if (mp_time_sync_is_join_barrier_active()) {
+                        uint8_t event_buf[16];
+                        net_serializer es;
+                        mp_time_sync_set_join_barrier(0);
+                        net_serializer_init(&es, event_buf, sizeof(event_buf));
+                        net_write_u16(&es, NET_EVENT_JOIN_BARRIER_RELEASED);
+                        net_write_u32(&es, session.authoritative_tick);
+                        net_write_u8(&es, peer->player_id);
+                        net_session_broadcast_in_game(NET_MSG_HOST_EVENT, event_buf,
+                                                      (uint32_t)net_serializer_position(&es));
+                    }
+
+                    extern void mp_bootstrap_host_complete_late_join(uint8_t peer_index);
+                    mp_bootstrap_host_complete_late_join((uint8_t)(peer - session.peers));
+                } else {
+                    mp_bootstrap_host_complete_reconnect((uint8_t)(peer - session.peers));
                 }
-
-                broadcast_full_snapshot_to_in_game_peers();
-
-                /* Release join barrier */
-                mp_time_sync_set_join_barrier(0);
-
-                /* Broadcast barrier release event */
-                uint8_t event_buf[16];
-                net_serializer es;
-                net_serializer_init(&es, event_buf, sizeof(event_buf));
-                net_write_u16(&es, NET_EVENT_JOIN_BARRIER_RELEASED);
-                net_write_u32(&es, session.authoritative_tick);
-                net_write_u8(&es, peer->player_id);
-                net_session_broadcast_in_game(NET_MSG_HOST_EVENT, event_buf,
-                                              (uint32_t)net_serializer_position(&es));
-
-                extern void mp_bootstrap_host_complete_late_join(uint8_t peer_index);
-                mp_bootstrap_host_complete_late_join((uint8_t)(peer - session.peers));
 
                 MP_LOG_INFO("BOOT", "Join barrier released: player %d fully loaded",
                             (int)peer->player_id);

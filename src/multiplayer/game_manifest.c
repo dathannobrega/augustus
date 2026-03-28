@@ -4,6 +4,7 @@
 
 #include "network/serialize.h"
 #include "mp_debug_log.h"
+#include "core/calc.h"
 
 #include <string.h>
 
@@ -44,6 +45,14 @@ void mp_game_manifest_set(mp_game_mode mode, const char *scenario_name,
                 scenario_hash, session_seed, (int)max_players);
 }
 
+void mp_game_manifest_set_starting_finance(int treasury, int personal_savings,
+                                           int tax_percentage)
+{
+    manifest.initial_treasury = treasury;
+    manifest.starting_personal_savings = personal_savings;
+    manifest.starting_tax_percentage = (uint8_t)calc_bound(tax_percentage, 0, 25);
+}
+
 const mp_game_manifest *mp_game_manifest_get(void)
 {
     return &manifest;
@@ -59,23 +68,34 @@ void mp_game_manifest_set_player_count(uint8_t count)
     manifest.player_count = count;
 }
 
-void mp_game_manifest_serialize(uint8_t *buffer, uint32_t *out_size)
+void mp_game_manifest_serialize_explicit(const mp_game_manifest *src,
+                                         uint8_t *buffer, uint32_t *out_size)
 {
     net_serializer s;
     net_serializer_init(&s, buffer, 256);
 
-    net_write_u8(&s, (uint8_t)manifest.mode);
-    net_write_raw(&s, manifest.scenario_name, MP_MANIFEST_SCENARIO_NAME_MAX);
-    net_write_u32(&s, manifest.map_hash);
-    net_write_u32(&s, manifest.scenario_hash);
-    net_write_u32(&s, manifest.save_version);
-    net_write_u32(&s, manifest.session_seed);
-    net_write_u8(&s, manifest.max_players);
-    net_write_u8(&s, manifest.player_count);
-    net_write_u32(&s, manifest.feature_flags);
-    net_write_raw(&s, manifest.world_instance_uuid, MP_WORLD_UUID_SIZE);
+    const mp_game_manifest *active = src ? src : &manifest;
+
+    net_write_u8(&s, (uint8_t)active->mode);
+    net_write_raw(&s, active->scenario_name, MP_MANIFEST_SCENARIO_NAME_MAX);
+    net_write_u32(&s, active->map_hash);
+    net_write_u32(&s, active->scenario_hash);
+    net_write_u32(&s, active->save_version);
+    net_write_u32(&s, active->session_seed);
+    net_write_i32(&s, active->initial_treasury);
+    net_write_i32(&s, active->starting_personal_savings);
+    net_write_u8(&s, active->starting_tax_percentage);
+    net_write_u8(&s, active->max_players);
+    net_write_u8(&s, active->player_count);
+    net_write_u32(&s, active->feature_flags);
+    net_write_raw(&s, active->world_instance_uuid, MP_WORLD_UUID_SIZE);
 
     *out_size = (uint32_t)net_serializer_position(&s);
+}
+
+void mp_game_manifest_serialize(uint8_t *buffer, uint32_t *out_size)
+{
+    mp_game_manifest_serialize_explicit(&manifest, buffer, out_size);
 }
 
 int mp_game_manifest_deserialize(const uint8_t *buffer, uint32_t size)
@@ -90,6 +110,9 @@ int mp_game_manifest_deserialize(const uint8_t *buffer, uint32_t size)
     manifest.scenario_hash = net_read_u32(&s);
     manifest.save_version = net_read_u32(&s);
     manifest.session_seed = net_read_u32(&s);
+    manifest.initial_treasury = net_read_i32(&s);
+    manifest.starting_personal_savings = net_read_i32(&s);
+    manifest.starting_tax_percentage = net_read_u8(&s);
     manifest.max_players = net_read_u8(&s);
     manifest.player_count = net_read_u8(&s);
     manifest.feature_flags = net_read_u32(&s);

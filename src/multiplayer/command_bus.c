@@ -181,10 +181,19 @@ static int validate_create_trade_route(const mp_command *cmd)
         return MP_CMD_REJECT_CITY_NOT_OWNED;
     }
 
+    if (data->origin_city_id == data->dest_city_id) {
+        return MP_CMD_REJECT_INVALID;
+    }
+
     /* Validate destination city exists */
     empire_city *dest = empire_city_get(data->dest_city_id);
     if (!dest || !dest->in_use) {
         return MP_CMD_REJECT_CITY_NOT_FOUND;
+    }
+
+    if (mp_ownership_is_city_player_owned(data->dest_city_id) &&
+        mp_ownership_get_city_player_id(data->dest_city_id) == cmd->player_id) {
+        return MP_CMD_REJECT_INVALID;
     }
 
     /* Check if destination is a player city and is online */
@@ -392,12 +401,19 @@ static int validate_command(const mp_command *cmd)
 
         case MP_CMD_SET_RESOURCE_SETTING: {
             int res = cmd->data.resource_setting.resource;
+            uint8_t st = cmd->data.resource_setting.setting_type;
+            if (st > MP_TRADE_SETTING_DOCK_AVAILABLE) {
+                return MP_CMD_REJECT_INVALID;
+            }
+            if (st == MP_TRADE_SETTING_DOCK_AVAILABLE) {
+                if (cmd->data.resource_setting.value < 0 ||
+                    cmd->data.resource_setting.value > 1) {
+                    return MP_CMD_REJECT_INVALID;
+                }
+                return MP_CMD_REJECT_NONE;
+            }
             if (res < RESOURCE_MIN || res >= RESOURCE_MAX) {
                 return MP_CMD_REJECT_RESOURCE_INVALID;
-            }
-            uint8_t st = cmd->data.resource_setting.setting_type;
-            if (st > 2) { /* MP_TRADE_SETTING_STOCKPILE = 2 */
-                return MP_CMD_REJECT_INVALID;
             }
             return MP_CMD_REJECT_NONE;
         }

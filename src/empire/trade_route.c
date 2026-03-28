@@ -1,5 +1,7 @@
 #include "trade_route.h"
 
+#include "building/count.h"
+#include "building/type.h"
 #include "core/array.h"
 #include "core/log.h"
 #include "empire/city.h"
@@ -12,6 +14,55 @@
 #include "multiplayer/mp_trade_route.h"
 #include "multiplayer/ownership.h"
 #include "network/session.h"
+
+static int route_city_supports_land_trade(int city_id)
+{
+    const empire_city *city = empire_city_get(city_id);
+    if (!city || !city->in_use) {
+        return 0;
+    }
+    if (net_session_is_active() && mp_ownership_is_city_remote_player(city_id)) {
+        const mp_city_trade_view *view = mp_empire_sync_get_trade_view(city_id);
+        if (view) {
+            return view->land_route_available;
+        }
+    }
+    return !city->is_sea_trade;
+}
+
+static int route_city_supports_sea_trade(int city_id)
+{
+    const empire_city *city = empire_city_get(city_id);
+    int local_has_dock = building_count_active(BUILDING_DOCK) > 0;
+    if (!city || !city->in_use) {
+        return 0;
+    }
+    if (net_session_is_active() && mp_ownership_is_city_remote_player(city_id)) {
+        const mp_city_trade_view *view = mp_empire_sync_get_trade_view(city_id);
+        if (view) {
+            return view->dock_available && local_has_dock;
+        }
+    }
+    return city->is_sea_trade && local_has_dock;
+}
+
+static int infer_mp_potential_transport(int local_city_id, int counterpart_city_id,
+                                        const empire_city *counterpart)
+{
+    (void)counterpart;
+    int has_land = route_city_supports_land_trade(local_city_id) &&
+                   route_city_supports_land_trade(counterpart_city_id);
+    int has_sea = route_city_supports_sea_trade(local_city_id) &&
+                  route_city_supports_sea_trade(counterpart_city_id);
+
+    if (has_land) {
+        return MP_TROUTE_LAND;
+    }
+    if (has_sea) {
+        return MP_TROUTE_SEA;
+    }
+    return MP_TROUTE_AUTO;
+}
 #endif
 
 typedef struct {
@@ -113,7 +164,8 @@ static void populate_legacy_trade_arrays(int route_id, trade_route_view *out)
 static int populate_mp_route_view(int local_city_id, int counterpart_city_id,
                                   const empire_city *counterpart, trade_route_view *out)
 {
-    if (!net_session_is_active() || local_city_id < 0) {
+    if (!net_session_is_active() || local_city_id < 0 ||
+        local_city_id == counterpart_city_id) {
         return 0;
     }
 
@@ -169,7 +221,13 @@ static int populate_mp_potential_view(int local_city_id, int counterpart_city_id
                                       const empire_city *counterpart, trade_route_view *out)
 {
     if (!net_session_is_active() || local_city_id < 0 ||
+        local_city_id == counterpart_city_id ||
         !mp_ownership_is_city_player_owned(counterpart_city_id)) {
+        return 0;
+    }
+
+    out->transport = infer_mp_potential_transport(local_city_id, counterpart_city_id, counterpart);
+    if (out->transport == MP_TROUTE_AUTO) {
         return 0;
     }
 
@@ -180,7 +238,6 @@ static int populate_mp_potential_view(int local_city_id, int counterpart_city_id
     out->counterpart_city_id = counterpart_city_id;
     out->is_player_to_player = 1;
     out->counterpart_online = mp_ownership_is_city_online(counterpart_city_id);
-    out->transport = counterpart->is_sea_trade ? MP_TROUTE_SEA : MP_TROUTE_LAND;
     out->state = MP_ROUTE_STATE_INACTIVE;
     out->is_open = 0;
     out->is_drawable = 0;
@@ -205,6 +262,13 @@ int trade_route_get_view_for_city_pair(int local_city_id, int counterpart_city_i
     if (!out || counterpart_city_id < 0) {
         return 0;
     }
+
+#ifdef ENABLE_MULTIPLAYER
+    if (net_session_is_active() && local_city_id >= 0 &&
+        local_city_id == counterpart_city_id) {
+        return 0;
+    }
+#endif
 
     const empire_city *counterpart = empire_city_get(counterpart_city_id);
     if (!counterpart || !counterpart->in_use) {
@@ -363,6 +427,15 @@ void trade_route_set_limit(int route_id, resource_type resource, int amount, int
         array_item(routes, route_id)->buys.limit[resource] = amount;
     } else {
         array_item(routes, route_id)->sells.limit[resource] = amount;
+    }
+}
+
+void trade_route_set_traded(int route_id, resource_type resource, int amount, int buying)
+{
+    if (buying) {
+        array_item(routes, route_id)->buys.traded[resource] = amount;
+    } else {
+        array_item(routes, route_id)->sells.traded[resource] = amount;
     }
 }
 

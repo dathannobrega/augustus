@@ -145,8 +145,15 @@ void mp_empire_sync_update_trade_views(void)
             }
         }
 
-        /* Update infrastructure status */
-        view->dock_available = city->is_sea_trade ? building_count_active(BUILDING_DOCK) > 0 : 0;
+        /* Update infrastructure status.
+         * Remote player cities keep the dock flag reported by their owner;
+         * otherwise the host would accidentally project its own dock state
+         * onto every remote city. */
+        if (mp_ownership_is_city_local(view->city_id)) {
+            view->dock_available = city->is_sea_trade ? building_count_active(BUILDING_DOCK) > 0 : 0;
+        } else if (!city->is_sea_trade) {
+            view->dock_available = 0;
+        }
         view->land_route_available = !city->is_sea_trade;
     }
 
@@ -183,6 +190,16 @@ void mp_empire_sync_broadcast_views(void)
 const mp_city_trade_view *mp_empire_sync_get_trade_view(int city_id)
 {
     return find_view(city_id);
+}
+
+void mp_empire_sync_set_city_dock_available(int city_id, int available)
+{
+    mp_city_trade_view *view = alloc_view(city_id);
+    if (!view) {
+        return;
+    }
+    view->dock_available = available ? 1 : 0;
+    sync_data.dirty = 1;
 }
 
 int mp_empire_sync_get_city_id_for_player(uint8_t player_id)

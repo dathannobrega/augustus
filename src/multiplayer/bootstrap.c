@@ -28,6 +28,8 @@
 #include "network/transport_tcp.h"
 #include "network/discovery_lan.h"
 #include "scenario/empire.h"
+#include "city/finance.h"
+#include "city/emperor.h"
 #include "empire/city.h"
 #include "game/file.h"
 #include "game/state.h"
@@ -53,6 +55,13 @@ static struct {
         uint8_t peer_index;
         uint8_t player_id;
     } late_join;
+    struct {
+        int active;
+        int transfer_in_progress;
+        int awaiting_load_complete;
+        uint8_t peer_index;
+        uint8_t player_id;
+    } reconnect;
 } boot_data;
 
 void mp_bootstrap_init(void)
@@ -103,6 +112,7 @@ static uint32_t generate_session_seed(void)
 }
 
 static void finalize_late_join_transfer(void);
+static void finalize_reconnect_transfer(void);
 
 static int load_scenario_locally(const char *scenario_name)
 {
@@ -274,6 +284,10 @@ int mp_bootstrap_host_start_game(void)
         return 0;
     }
 
+    mp_game_manifest_set_starting_finance(city_finance_treasury(),
+                                          city_emperor_personal_savings(),
+                                          city_finance_tax_percentage());
+
     /* 3b. Validate scenario has enough eligible cities for player count */
     if (!mp_scenario_validate_for_multiplayer(player_count)) {
         MP_LOG_ERROR("BOOT", "Scenario '%s' does not support %d players — aborting",
@@ -329,18 +343,7 @@ int mp_bootstrap_host_start_game(void)
     /* 9. Broadcast spawn table to clients */
     broadcast_spawn_table();
 
-    /* 10. Send GAME_START_FINAL to all peers */
-    {
-        uint8_t start_buf[8];
-        net_serializer ss;
-        net_serializer_init(&ss, start_buf, sizeof(start_buf));
-        net_write_u32(&ss, 0); /* start tick */
-        net_write_u8(&ss, 2);  /* normal speed */
-        net_session_broadcast_in_game(NET_MSG_GAME_START_FINAL, start_buf,
-                                      (uint32_t)net_serializer_position(&ss));
-    }
-
-    /* 11. Send initial full snapshot so clients have authoritative MP state */
+    /* 10. Send initial full snapshot so clients have authoritative MP state */
     {
         uint8_t *snap_buf = (uint8_t *)malloc(MP_SNAPSHOT_MAX_SIZE);
         if (snap_buf) {
@@ -351,6 +354,17 @@ int mp_bootstrap_host_start_game(void)
             }
             free(snap_buf);
         }
+    }
+
+    /* 11. Send GAME_START_FINAL after the authoritative snapshot */
+    {
+        uint8_t start_buf[8];
+        net_serializer ss;
+        net_serializer_init(&ss, start_buf, sizeof(start_buf));
+        net_write_u32(&ss, 0); /* start tick */
+        net_write_u8(&ss, 2);  /* normal speed */
+        net_session_broadcast_in_game(NET_MSG_GAME_START_FINAL, start_buf,
+                                      (uint32_t)net_serializer_position(&ss));
     }
 
     /* 12. Transition to WINDOW_CITY */
@@ -413,6 +427,10 @@ int mp_bootstrap_client_prepare(const uint8_t *payload, uint32_t size)
                      manifest->scenario_name);
         return 0;
     }
+
+    city_finance_apply_starting_state(manifest->initial_treasury,
+                                      manifest->starting_tax_percentage);
+    city_emperor_set_personal_savings(manifest->starting_personal_savings);
 
     /* 4b. Validate scenario hash matches host's manifest */
     if (manifest->scenario_hash != 0) {
@@ -490,6 +508,11 @@ int mp_bootstrap_is_resume(void)
 int mp_bootstrap_is_late_join_busy(void)
 {
     return boot_data.late_join.active;
+}
+
+int mp_bootstrap_is_reconnect_busy(void)
+{
+    return boot_data.reconnect.active;
 }
 
 void mp_bootstrap_set_save(const char *save_filename)
@@ -735,6 +758,14 @@ void mp_bootstrap_update(void)
             return;
         }
         finalize_late_join_transfer();
+        return;
+    }
+
+    if (net_session_is_host() && boot_data.reconnect.transfer_in_progress) {
+        if (mp_save_transfer_host_update()) {
+            return;
+        }
+        finalize_reconnect_transfer();
     }
 }
 
@@ -808,6 +839,109 @@ static void finalize_late_join_transfer(void)
     boot_data.late_join.awaiting_load_complete = 1;
 }
 
+static void finalize_reconnect_transfer(void)
+{
+    uint8_t peer_index = boot_data.reconnect.peer_index;
+
+    {
+        uint8_t *snap_buf = (uint8_t *)malloc(MP_SNAPSHOT_MAX_SIZE);
+        if (snap_buf) {
+            uint32_t snap_size = 0;
+            if (mp_snapshot_build_full(snap_buf, MP_SNAPSHOT_MAX_SIZE, &snap_size)) {
+                net_session_send_to_peer(peer_index, NET_MSG_FULL_SNAPSHOT,
+                                         snap_buf, snap_size);
+            }
+            free(snap_buf);
+        }
+    }
+
+    {
+        uint8_t start_buf[8];
+        net_serializer ss;
+        net_serializer_init(&ss, start_buf, sizeof(start_buf));
+        net_write_u32(&ss, mp_time_sync_get_authoritative_tick());
+        net_write_u8(&ss, mp_time_sync_get_speed());
+        net_session_send_to_peer(peer_index, NET_MSG_GAME_START_FINAL,
+                                 start_buf, (uint32_t)net_serializer_position(&ss));
+    }
+
+    boot_data.reconnect.transfer_in_progress = 0;
+    boot_data.reconnect.awaiting_load_complete = 1;
+}
+
+int mp_bootstrap_host_begin_reconnect(uint8_t peer_index, uint8_t player_id)
+{
+    mp_game_manifest reconnect_manifest;
+    uint8_t manifest_buf[256];
+    uint32_t manifest_size = 0;
+    const char *checkpoint_path;
+    net_session *sess;
+
+    if (!net_session_is_host() || !net_session_is_in_game()) {
+        return 0;
+    }
+    if (boot_data.late_join.active || boot_data.reconnect.active) {
+        MP_LOG_WARN("BOOT", "Peer-scoped save transfer already active");
+        return 0;
+    }
+
+    sess = net_session_get();
+    if (peer_index >= NET_MAX_PEERS || !sess->peers[peer_index].active) {
+        return 0;
+    }
+    sess->peers[peer_index].state = PEER_STATE_LOADING;
+
+    reconnect_manifest = *mp_game_manifest_get();
+    reconnect_manifest.mode = MP_GAME_MODE_SAVED_GAME;
+    reconnect_manifest.player_count = (uint8_t)mp_player_registry_get_count();
+    reconnect_manifest.valid = 1;
+    mp_game_manifest_serialize_explicit(&reconnect_manifest, manifest_buf, &manifest_size);
+    net_session_send_to_peer(peer_index, NET_MSG_GAME_PREPARE, manifest_buf, manifest_size);
+
+    checkpoint_path = mp_safe_file_get_save_path("mp_reconnect_checkpoint.sav");
+    if (!game_file_write_saved_game(checkpoint_path)) {
+        MP_LOG_ERROR("BOOT", "Failed to write reconnect checkpoint");
+        return 0;
+    }
+
+    mp_save_transfer_init();
+    if (!mp_save_transfer_host_begin_for_peer(checkpoint_path, peer_index)) {
+        MP_LOG_ERROR("BOOT", "Failed to start reconnect transfer");
+        platform_file_manager_remove_file(checkpoint_path);
+        return 0;
+    }
+    platform_file_manager_remove_file(checkpoint_path);
+
+    boot_data.reconnect.active = 1;
+    boot_data.reconnect.transfer_in_progress = 1;
+    boot_data.reconnect.awaiting_load_complete = 0;
+    boot_data.reconnect.peer_index = peer_index;
+    boot_data.reconnect.player_id = player_id;
+
+    MP_LOG_INFO("BOOT", "Reconnect transfer started for player %d on peer %d",
+                (int)player_id, (int)peer_index);
+    return 1;
+}
+
+void mp_bootstrap_host_cancel_reconnect(uint8_t peer_index)
+{
+    if (!boot_data.reconnect.active || boot_data.reconnect.peer_index != peer_index) {
+        return;
+    }
+    if (boot_data.reconnect.transfer_in_progress) {
+        mp_save_transfer_reset();
+    }
+    memset(&boot_data.reconnect, 0, sizeof(boot_data.reconnect));
+}
+
+void mp_bootstrap_host_complete_reconnect(uint8_t peer_index)
+{
+    if (!boot_data.reconnect.active || boot_data.reconnect.peer_index != peer_index) {
+        return;
+    }
+    memset(&boot_data.reconnect, 0, sizeof(boot_data.reconnect));
+}
+
 void mp_bootstrap_host_cancel_late_join(uint8_t peer_index)
 {
     if (!boot_data.late_join.active || boot_data.late_join.peer_index != peer_index) {
@@ -840,7 +974,7 @@ int mp_bootstrap_host_handle_late_join(uint8_t peer_index, const char *player_na
     if (!net_session_is_host()) {
         goto fail;
     }
-    if (boot_data.late_join.active) {
+    if (boot_data.late_join.active || boot_data.reconnect.active) {
         MP_LOG_WARN("BOOT", "Late join already in progress â€” rejecting new request");
         reject_reason = NET_REJECT_LATE_JOIN_BUSY;
         goto fail;

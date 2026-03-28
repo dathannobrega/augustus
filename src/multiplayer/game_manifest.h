@@ -27,6 +27,9 @@ typedef struct {
     uint32_t scenario_hash;   /* CRC32 of the scenario data */
     uint32_t save_version;    /* Savegame format version (for compat check) */
     uint32_t session_seed;    /* Deterministic seed for worldgen */
+    int32_t initial_treasury; /* Host-authoritative starting treasury */
+    int32_t starting_personal_savings; /* Host-authoritative starting savings */
+    uint8_t starting_tax_percentage;
     uint8_t max_players;      /* Capacity (2..8) */
     uint8_t player_count;     /* Currently joined players */
     uint32_t feature_flags;   /* Bitmask of enabled game features */
@@ -43,6 +46,8 @@ void mp_game_manifest_set(mp_game_mode mode, const char *scenario_name,
                           uint32_t map_hash, uint32_t scenario_hash,
                           uint32_t save_version, uint32_t session_seed,
                           uint8_t max_players);
+void mp_game_manifest_set_starting_finance(int treasury, int personal_savings,
+                                           int tax_percentage);
 
 /* Get the current manifest (const) */
 const mp_game_manifest *mp_game_manifest_get(void);
@@ -54,6 +59,8 @@ mp_game_manifest *mp_game_manifest_get_mutable(void);
 void mp_game_manifest_set_player_count(uint8_t count);
 
 /* Serialization for network transmission */
+void mp_game_manifest_serialize_explicit(const mp_game_manifest *src,
+                                         uint8_t *buffer, uint32_t *out_size);
 void mp_game_manifest_serialize(uint8_t *buffer, uint32_t *out_size);
 int mp_game_manifest_deserialize(const uint8_t *buffer, uint32_t size);
 

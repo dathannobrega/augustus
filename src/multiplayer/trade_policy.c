@@ -10,6 +10,7 @@
 #include "network/session.h"
 #include "network/serialize.h"
 #include "network/protocol.h"
+#include "building/count.h"
 #include "empire/city.h"
 #include "empire/trade_route.h"
 #include "city/resource.h"
@@ -18,6 +19,11 @@
 #include "core/config.h"
 
 #include <string.h>
+
+static struct {
+    int initialized;
+    int last_dock_available;
+} local_runtime_state;
 
 /**
  * Unified trade policy — canonical answer for "can this trade happen?"
@@ -192,6 +198,15 @@ void mp_trade_policy_apply_remote_setting(uint8_t player_id, int resource,
     MP_LOG_INFO("TRADE_POLICY", "Remote setting from player %d: res=%d type=%d val=%d",
                 (int)player_id, resource, setting_type, value);
 
+    if (setting_type == MP_TRADE_SETTING_DOCK_AVAILABLE) {
+        int city_id = mp_empire_sync_get_city_id_for_player(player_id);
+        if (city_id >= 0) {
+            mp_empire_sync_set_city_dock_available(city_id, value);
+        }
+        mp_trade_policy_force_view_update(player_id);
+        return;
+    }
+
     /* Update the empire_city struct for this player's city so that:
      * 1. Trade views reflect the correct exportable/importable state
      * 2. generate_trader() can compute trade potential for P2P routes */
@@ -247,12 +262,37 @@ void mp_trade_policy_send_all_settings(void)
         int is_export = (status & TRADE_STATUS_EXPORT) != 0;
         int is_import = (status & TRADE_STATUS_IMPORT) != 0;
 
-        if (is_export) {
-            mp_trade_policy_notify_setting_changed(r, MP_TRADE_SETTING_EXPORT, 1);
-        }
-        if (is_import) {
-            mp_trade_policy_notify_setting_changed(r, MP_TRADE_SETTING_IMPORT, 1);
-        }
+        mp_trade_policy_notify_setting_changed(r, MP_TRADE_SETTING_EXPORT,
+                                               is_export ? 1 : 0);
+        mp_trade_policy_notify_setting_changed(r, MP_TRADE_SETTING_IMPORT,
+                                               is_import ? 1 : 0);
+    }
+
+    local_runtime_state.initialized = 1;
+    local_runtime_state.last_dock_available = building_count_active(BUILDING_DOCK) > 0 ? 1 : 0;
+    mp_trade_policy_notify_setting_changed(RESOURCE_NONE,
+                                           MP_TRADE_SETTING_DOCK_AVAILABLE,
+                                           local_runtime_state.last_dock_available);
+}
+
+void mp_trade_policy_update_local_runtime_state(void)
+{
+    int dock_available;
+
+    if (!net_session_is_in_game() || net_session_is_host()) {
+        local_runtime_state.initialized = 0;
+        local_runtime_state.last_dock_available = 0;
+        return;
+    }
+
+    dock_available = building_count_active(BUILDING_DOCK) > 0 ? 1 : 0;
+    if (!local_runtime_state.initialized ||
+        local_runtime_state.last_dock_available != dock_available) {
+        local_runtime_state.initialized = 1;
+        local_runtime_state.last_dock_available = dock_available;
+        mp_trade_policy_notify_setting_changed(RESOURCE_NONE,
+                                               MP_TRADE_SETTING_DOCK_AVAILABLE,
+                                               dock_available);
     }
 }
 

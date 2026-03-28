@@ -164,7 +164,7 @@ typedef struct {
 
 /**
  * Change a city resource setting (import/export toggle or stockpile threshold).
- * Setting types: 0=export, 1=import, 2=stockpile threshold.
+ * Setting types: 0=export, 1=import, 2=stockpile threshold, 3=dock available.
  */
 typedef struct {
     int resource;
