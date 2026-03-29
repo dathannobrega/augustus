@@ -37,6 +37,7 @@ int mp_scenario_count_eligible_cities(void);
  * @return 1 if valid, 0 if not enough eligible cities
  */
 int mp_scenario_validate_for_multiplayer(int player_count);
+int mp_scenario_validate_capacity(int required_city_count);
 
 /**
  * Compute FNV-1a hash of a scenario file on disk.

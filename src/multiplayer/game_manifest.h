@@ -12,6 +12,7 @@
  */
 
 #define MP_MANIFEST_SCENARIO_NAME_MAX 64
+#define MP_GAME_MANIFEST_WIRE_MAX     512
 
 typedef enum {
     MP_GAME_MODE_SCENARIO = 0, /* Fresh scenario start */

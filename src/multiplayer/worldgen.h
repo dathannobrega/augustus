@@ -111,6 +111,7 @@ void mp_worldgen_clear(void);
  * @return Number of reserved spawns actually generated
  */
 int mp_worldgen_generate_reserved_spawns(int reserve_count);
+int mp_worldgen_generate_dynamic_city_pool(int pool_count);
 
 /**
  * Assign a reserved spawn to a late joiner.
@@ -128,6 +129,7 @@ void mp_worldgen_return_to_reserved(int empire_city_id);
  * Get the number of available reserved spawns.
  */
 int mp_worldgen_get_reserved_count(void);
+int mp_worldgen_get_dynamic_city_pool_remaining(void);
 
 #endif /* ENABLE_MULTIPLAYER */
 

@@ -18,6 +18,7 @@
 #include "multiplayer/client_identity.h"
 #include "multiplayer/game_manifest.h"
 #include "multiplayer/mp_debug_log.h"
+#include "multiplayer/dedicated_server.h"
 #include "core/config.h"
 #include "core/log.h"
 
@@ -127,6 +128,16 @@ static int find_peer_index(const net_peer *peer)
     return -1;
 }
 
+static int session_host_uses_player_slot(void)
+{
+    return !mp_dedicated_server_is_enabled();
+}
+
+static uint8_t first_assignable_player_id(void)
+{
+    return session_host_uses_player_slot() ? 1 : 0;
+}
+
 static void copy_current_world_uuid(uint8_t *out_uuid)
 {
     const mp_game_manifest *manifest = mp_game_manifest_get();
@@ -223,7 +234,14 @@ static void build_discovery_announcement(net_discovery_announcement *announcemen
     strncpy(announcement->host_name, session.local_player_name,
             sizeof(announcement->host_name) - 1);
     announcement->game_port = session.port;
-    announcement->player_count = player_count > 0 ? player_count : 1;
+    if (mp_dedicated_server_is_enabled()) {
+        const mp_dedicated_server_options *options = mp_dedicated_server_get_options();
+        if (options) {
+            max_players = options->max_players;
+        }
+    }
+
+    announcement->player_count = player_count;
     if (manifest && manifest->valid) {
         if (manifest->max_players > 0) {
             max_players = manifest->max_players;
@@ -521,8 +539,10 @@ static void reject_peer(net_peer *peer, uint8_t reason, const char *log_context)
     send_raw_to_peer(peer, NET_MSG_JOIN_REJECT, reject_buf,
                      (uint32_t)net_serializer_position(&rs));
 
-    MP_LOG_WARN("HANDSHAKE", "JOIN_REJECT sent: peer='%s' reason=%d context=%s",
-                peer->name[0] ? peer->name : "<pending>", (int)reason,
+    MP_LOG_WARN("HANDSHAKE", "JOIN_REJECT sent: peer='%s' addr='%s' reason=%d context=%s",
+                peer->name[0] ? peer->name : "<pending>",
+                peer->remote_address[0] ? peer->remote_address : "<unknown>",
+                (int)reason,
                 log_context ? log_context : "n/a");
 
     peer_index = find_peer_index(peer);
@@ -728,6 +748,12 @@ static void handle_hello_impl(net_peer *peer, const uint8_t *payload, uint32_t s
     existing = has_uuid ? mp_player_registry_get_by_uuid(player_uuid) : NULL;
     reserved_slots = mp_worldgen_get_reserved_count();
 
+    if (mp_dedicated_server_is_banned(has_uuid ? player_uuid : NULL,
+                                      peer->remote_address)) {
+        reject_peer(peer, NET_REJECT_BANNED, "banlist_match");
+        return;
+    }
+
     if (session.state == NET_SESSION_HOSTING_LOBBY && mp_bootstrap_is_resume()) {
         uint8_t old_player_id;
 
@@ -859,51 +885,52 @@ static void handle_hello_impl(net_peer *peer, const uint8_t *payload, uint32_t s
             return;
         }
     }
-    if (strncmp(session.local_player_name, name, NET_MAX_PLAYER_NAME - 1) == 0) {
+    if (net_session_has_local_player() &&
+        strncmp(session.local_player_name, name, NET_MAX_PLAYER_NAME - 1) == 0) {
         reject_peer(peer, NET_REJECT_NAME_TAKEN, "duplicate_host_name");
         return;
     }
 
     {
-        uint8_t new_player_id = 0;
+        int new_player_id = -1;
         int slot;
         mp_player *new_player;
         uint32_t now = net_tcp_get_timestamp_ms();
         uint32_t session_seed = mp_worldgen_get_spawn_table_mutable()->session_seed;
 
-        for (int i = 1; i < MP_MAX_PLAYERS; i++) {
+        for (int i = first_assignable_player_id(); i < MP_MAX_PLAYERS; i++) {
             mp_player *candidate = mp_player_registry_get((uint8_t)i);
             if (!candidate || !candidate->active) {
-                new_player_id = (uint8_t)i;
+                new_player_id = i;
                 break;
             }
         }
-        if (new_player_id == 0) {
+        if (new_player_id < 0) {
             reject_peer(peer, NET_REJECT_SESSION_FULL, "lobby_full");
             return;
         }
 
-        if (!mp_player_registry_add(new_player_id, name, 0, 0)) {
+        if (!mp_player_registry_add((uint8_t)new_player_id, name, 0, 0)) {
             reject_peer(peer, NET_REJECT_INTERNAL_ERROR, "registry_add_failed");
             return;
         }
 
-        slot = mp_player_registry_assign_slot(new_player_id);
+        slot = mp_player_registry_assign_slot((uint8_t)new_player_id);
         if (slot < 0) {
-            mp_player_registry_remove(new_player_id);
+            mp_player_registry_remove((uint8_t)new_player_id);
             reject_peer(peer, NET_REJECT_SESSION_FULL, "slot_assign_failed");
             return;
         }
 
-        net_peer_set_player_id(peer, new_player_id);
+        net_peer_set_player_id(peer, (uint8_t)new_player_id);
         peer->state = PEER_STATE_JOINED;
         peer->last_heartbeat_recv_ms = now;
 
-        mp_player_registry_set_status(new_player_id, MP_PLAYER_LOBBY);
-        mp_player_registry_set_connection_state(new_player_id, MP_CONNECTION_CONNECTED);
+        mp_player_registry_set_status((uint8_t)new_player_id, MP_PLAYER_LOBBY);
+        mp_player_registry_set_connection_state((uint8_t)new_player_id, MP_CONNECTION_CONNECTED);
 
-        new_player = mp_player_registry_get(new_player_id);
-        send_join_accept_to_peer(peer, new_player_id, (uint8_t)slot,
+        new_player = mp_player_registry_get((uint8_t)new_player_id);
+        send_join_accept_to_peer(peer, (uint8_t)new_player_id, (uint8_t)slot,
                                  new_player ? new_player->player_uuid : NULL,
                                  new_player ? new_player->reconnect_token : NULL,
                                  (uint8_t)mp_player_registry_get_count(),
@@ -1710,15 +1737,19 @@ static void host_accept_connections(void)
     }
 
     int client_fd = net_tcp_accept(session.listen_fd);
+    char remote_address[48] = {0};
     if (client_fd < 0) {
         return;
     }
+
+    net_tcp_get_peer_address(client_fd, remote_address, sizeof(remote_address));
 
     int slot = find_free_peer_slot();
     if (slot < 0) {
         net_peer temp_peer;
         net_peer_init(&temp_peer);
         net_peer_set_connected(&temp_peer, client_fd, "Pending");
+        net_peer_set_remote_address(&temp_peer, remote_address);
         log_error("Session full, rejecting connection", 0, 0);
         reject_peer(&temp_peer, NET_REJECT_SESSION_FULL, "accept_connection_full");
         return;
@@ -1726,11 +1757,14 @@ static void host_accept_connections(void)
 
     net_peer_init(&session.peers[slot]);
     net_peer_set_connected(&session.peers[slot], client_fd, "");
+    net_peer_set_remote_address(&session.peers[slot], remote_address);
     session.peer_count++;
 
     log_info("New connection accepted in slot", 0, slot);
-    MP_LOG_INFO("SESSION", "New TCP connection accepted: slot=%d fd=%d total_peers=%d",
-                slot, client_fd, session.peer_count);
+    MP_LOG_INFO("SESSION", "New TCP connection accepted: slot=%d fd=%d addr='%s' total_peers=%d",
+                slot, client_fd,
+                remote_address[0] ? remote_address : "<unknown>",
+                session.peer_count);
 }
 
 static void host_process_peers(void)
@@ -1866,6 +1900,7 @@ int net_session_init(void)
     heartbeat_sample_counter = 0;
     session.listen_fd = -1;
     session.udp_fd = -1;
+    session.local_player_id = NET_PLAYER_ID_NONE;
 
     for (int i = 0; i < NET_MAX_PEERS; i++) {
         net_peer_init(&session.peers[i]);
@@ -1909,13 +1944,16 @@ void net_session_shutdown(void)
 int net_session_host(const char *player_name, uint16_t port)
 {
     net_discovery_announcement announcement;
+    const mp_dedicated_server_options *dedicated_options = mp_dedicated_server_get_options();
 
     if (session.state != NET_SESSION_IDLE) {
         log_error("Cannot host: session not idle", 0, 0);
         return 0;
     }
 
-    session.listen_fd = net_tcp_listen(port);
+    session.listen_fd = net_tcp_listen_on(
+        mp_dedicated_server_is_enabled() ? mp_dedicated_server_get_listen_address() : NULL,
+        port);
     if (session.listen_fd < 0) {
         return 0;
     }
@@ -1929,21 +1967,25 @@ int net_session_host(const char *player_name, uint16_t port)
     session.role = NET_ROLE_HOST;
     session.state = NET_SESSION_HOSTING_LOBBY;
     session.session_id = generate_session_id();
-    session.local_player_id = 0; /* Host is always player 0 */
+    session.local_player_id = session_host_uses_player_slot() ? 0 : NET_PLAYER_ID_NONE;
 
     strncpy(session.local_player_name, player_name, NET_MAX_PLAYER_NAME - 1);
     session.local_player_name[NET_MAX_PLAYER_NAME - 1] = '\0';
 
-    /* Register host in player registry */
+    /* Register host in player registry only when the host is also a playable participant. */
     mp_player_registry_init();
-    mp_player_registry_add(0, player_name, 1, 1);
-    mp_player_registry_set_status(0, MP_PLAYER_LOBBY);
-    mp_player_registry_set_connection_state(0, MP_CONNECTION_CONNECTED);
-    mp_player_registry_assign_slot(0);
+    if (session_host_uses_player_slot()) {
+        mp_player_registry_add(0, player_name, 1, 1);
+        mp_player_registry_set_status(0, MP_PLAYER_LOBBY);
+        mp_player_registry_set_connection_state(0, MP_CONNECTION_CONNECTED);
+        mp_player_registry_assign_slot(0);
+    }
 
     /* Start LAN discovery broadcasting so clients can find this host */
-    build_discovery_announcement(&announcement);
-    net_discovery_start_announcing(&announcement);
+    if (!mp_dedicated_server_is_enabled() || !dedicated_options || dedicated_options->advertise_lan) {
+        build_discovery_announcement(&announcement);
+        net_discovery_start_announcing(&announcement);
+    }
 
     log_info("Hosting session", player_name, (int)port);
     MP_LOG_INFO("SESSION", "Hosting session: name='%s' port=%d session_id=0x%08x",
@@ -2145,6 +2187,7 @@ void net_session_disconnect(void)
     session.state = NET_SESSION_IDLE;
     session.role = NET_ROLE_NONE;
     session.peer_count = 0;
+    session.local_player_id = NET_PLAYER_ID_NONE;
     join_status = preserved_join_status;
     join_reject_reason = preserved_reject_reason;
     join_start_ms = 0;
@@ -2217,6 +2260,12 @@ int net_session_is_in_lobby(void)
            session.state == NET_SESSION_CLIENT_LOBBY;
 }
 
+int net_session_has_local_player(void)
+{
+    return session.local_player_id != NET_PLAYER_ID_NONE &&
+           mp_player_registry_get(session.local_player_id) != NULL;
+}
+
 net_session_state net_session_get_state(void)
 {
     return session.state;
@@ -2281,7 +2330,9 @@ int net_session_transition_to_game(void)
     }
 
     /* Update host player status */
-    mp_player_registry_set_status(0, MP_PLAYER_IN_GAME);
+    if (net_session_has_local_player()) {
+        mp_player_registry_set_status(session.local_player_id, MP_PLAYER_IN_GAME);
+    }
 
     /* Transition all active peers to IN_GAME state.
      * NOTE: NET_MSG_START_GAME is no longer broadcast here (deprecated).
@@ -2407,9 +2458,11 @@ void net_session_set_ready(int is_ready)
         net_write_u8(&s, (uint8_t)is_ready);
         net_session_send_to_host(NET_MSG_READY_STATE, buf, 2);
     } else if (session.role == NET_ROLE_HOST) {
-        mp_player_registry_set_status(session.local_player_id,
-            is_ready ? MP_PLAYER_READY : MP_PLAYER_LOBBY);
-        broadcast_lobby_snapshot();
+        if (net_session_has_local_player()) {
+            mp_player_registry_set_status(session.local_player_id,
+                is_ready ? MP_PLAYER_READY : MP_PLAYER_LOBBY);
+            broadcast_lobby_snapshot();
+        }
     }
 }
 

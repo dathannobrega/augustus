@@ -77,7 +77,7 @@ void net_tcp_shutdown(void)
     tcp_initialized = 0;
 }
 
-int net_tcp_listen(uint16_t port)
+int net_tcp_listen_on(const char *bind_address, uint16_t port)
 {
     int fd = (int)socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
     if (fd == INVALID_SOCKET) {
@@ -97,6 +97,24 @@ int net_tcp_listen(uint16_t port)
     memset(&addr, 0, sizeof(addr));
     addr.sin_family = AF_INET;
     addr.sin_addr.s_addr = INADDR_ANY;
+    if (bind_address && bind_address[0] &&
+        strcmp(bind_address, "0.0.0.0") != 0 &&
+        strcmp(bind_address, "*") != 0) {
+#ifdef _WIN32
+        addr.sin_addr.s_addr = inet_addr(bind_address);
+        if (addr.sin_addr.s_addr == INADDR_NONE) {
+            MP_LOG_ERROR("NET", "Invalid TCP bind address '%s'", bind_address);
+            NET_CLOSE_SOCKET(fd);
+            return -1;
+        }
+#else
+        if (inet_pton(AF_INET, bind_address, &addr.sin_addr) != 1) {
+            MP_LOG_ERROR("NET", "Invalid TCP bind address '%s'", bind_address);
+            NET_CLOSE_SOCKET(fd);
+            return -1;
+        }
+#endif
+    }
     addr.sin_port = htons(port);
 
     if (bind(fd, (struct sockaddr *)&addr, sizeof(addr)) == SOCKET_ERROR) {
@@ -127,6 +145,11 @@ int net_tcp_listen(uint16_t port)
     MP_LOG_INFO("NET", "TCP listening on port %d (fd=%d, backlog=%d)",
                 (int)port, fd, NET_MAX_PLAYERS);
     return fd;
+}
+
+int net_tcp_listen(uint16_t port)
+{
+    return net_tcp_listen_on(NULL, port);
 }
 
 int net_tcp_accept(int listen_fd)
@@ -302,6 +325,30 @@ int net_tcp_get_local_ip(char *buffer, size_t buffer_size)
 
     freeaddrinfo(result);
     return 1;
+}
+
+int net_tcp_get_peer_address(int socket_fd, char *buffer, size_t buffer_size)
+{
+    struct sockaddr_in addr;
+    socklen_t addr_len = sizeof(addr);
+
+    if (!buffer || buffer_size == 0) {
+        return 0;
+    }
+
+    buffer[0] = '\0';
+    if (socket_fd < 0) {
+        return 0;
+    }
+    if (getpeername(socket_fd, (struct sockaddr *)&addr, &addr_len) != 0) {
+        return 0;
+    }
+
+#ifdef _WIN32
+    return inet_ntop(AF_INET, &addr.sin_addr, buffer, (DWORD)buffer_size) != NULL;
+#else
+    return inet_ntop(AF_INET, &addr.sin_addr, buffer, buffer_size) != NULL;
+#endif
 }
 
 #endif /* ENABLE_MULTIPLAYER */

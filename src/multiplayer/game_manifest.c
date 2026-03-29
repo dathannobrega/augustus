@@ -2,6 +2,8 @@
 
 #ifdef ENABLE_MULTIPLAYER
 
+#include "server_rules.h"
+#include "dedicated_server.h"
 #include "network/serialize.h"
 #include "mp_debug_log.h"
 #include "core/calc.h"
@@ -13,11 +15,13 @@ static mp_game_manifest manifest;
 void mp_game_manifest_init(void)
 {
     memset(&manifest, 0, sizeof(mp_game_manifest));
+    mp_server_rules_init();
 }
 
 void mp_game_manifest_clear(void)
 {
     memset(&manifest, 0, sizeof(mp_game_manifest));
+    mp_server_rules_clear();
 }
 
 void mp_game_manifest_set(mp_game_mode mode, const char *scenario_name,
@@ -35,9 +39,10 @@ void mp_game_manifest_set(mp_game_mode mode, const char *scenario_name,
     manifest.save_version = save_version;
     manifest.session_seed = session_seed;
     manifest.max_players = max_players;
-    manifest.player_count = 1; /* Host is already counted */
+    manifest.player_count = mp_dedicated_server_is_enabled() ? 0 : 1;
     manifest.feature_flags = 0;
     manifest.valid = 1;
+    mp_server_rules_capture_from_config();
 
     MP_LOG_INFO("GAME", "Manifest set: mode=%d scenario='%s' map_hash=0x%08x "
                 "scenario_hash=0x%08x seed=%u max_players=%d",
@@ -72,7 +77,9 @@ void mp_game_manifest_serialize_explicit(const mp_game_manifest *src,
                                          uint8_t *buffer, uint32_t *out_size)
 {
     net_serializer s;
-    net_serializer_init(&s, buffer, 256);
+    uint8_t rules_buf[256];
+    uint32_t rules_size = 0;
+    net_serializer_init(&s, buffer, MP_GAME_MANIFEST_WIRE_MAX);
 
     const mp_game_manifest *active = src ? src : &manifest;
 
@@ -89,6 +96,16 @@ void mp_game_manifest_serialize_explicit(const mp_game_manifest *src,
     net_write_u8(&s, active->player_count);
     net_write_u32(&s, active->feature_flags);
     net_write_raw(&s, active->world_instance_uuid, MP_WORLD_UUID_SIZE);
+    mp_server_rules_serialize(rules_buf, sizeof(rules_buf), &rules_size);
+    if (rules_size > 0) {
+        net_write_raw(&s, rules_buf, rules_size);
+    }
+
+    if (net_serializer_has_overflow(&s)) {
+        MP_LOG_ERROR("GAME", "Manifest serialize overflow");
+        *out_size = 0;
+        return;
+    }
 
     *out_size = (uint32_t)net_serializer_position(&s);
 }
@@ -122,6 +139,18 @@ int mp_game_manifest_deserialize(const uint8_t *buffer, uint32_t size)
         net_read_raw(&s, manifest.world_instance_uuid, MP_WORLD_UUID_SIZE);
     } else {
         memset(manifest.world_instance_uuid, 0, MP_WORLD_UUID_SIZE);
+    }
+
+    if (!net_serializer_has_overflow(&s) && net_serializer_remaining(&s) > 0) {
+        size_t remaining = net_serializer_remaining(&s);
+        if (!mp_server_rules_deserialize(buffer + s.position, (uint32_t)remaining)) {
+            MP_LOG_ERROR("GAME", "Manifest authoritative rules invalid");
+            memset(&manifest, 0, sizeof(mp_game_manifest));
+            return 0;
+        }
+        s.position += remaining;
+    } else if (!net_serializer_has_overflow(&s)) {
+        mp_server_rules_clear();
     }
 
     if (net_serializer_has_overflow(&s)) {

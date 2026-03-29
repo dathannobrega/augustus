@@ -9,11 +9,13 @@
 #include "ownership.h"
 #include "player_registry.h"
 #include "resync.h"
+#include "dedicated_server.h"
 #include "time_sync.h"
 #include "trade_policy.h"
 #include "trade_sync.h"
 #include "empire_sync.h"
 #include "network/session.h"
+#include "network/transport_tcp.h"
 #include "network/serialize.h"
 #include "network/protocol.h"
 #include "building/building.h"
@@ -39,7 +41,65 @@ static struct {
     uint8_t last_reject_reason;
     uint32_t last_sequence_by_player[MP_MAX_PLAYERS];
     uint8_t queued_commands_by_player[MP_MAX_PLAYERS];
+    uint32_t rate_window_start_ms[MP_MAX_PLAYERS];
+    uint32_t commands_in_window[MP_MAX_PLAYERS];
 } bus;
+
+static uint32_t command_rate_limit_per_sec(void)
+{
+    const mp_dedicated_server_options *options;
+
+    if (!mp_dedicated_server_is_enabled()) {
+        return 30;
+    }
+
+    options = mp_dedicated_server_get_options();
+    return (options && options->command_rate_limit_per_sec > 0)
+        ? options->command_rate_limit_per_sec
+        : 30;
+}
+
+static uint32_t command_queue_limit_per_player(void)
+{
+    const mp_dedicated_server_options *options;
+
+    if (!mp_dedicated_server_is_enabled()) {
+        return MAX_QUEUED_COMMANDS_PER_PLAYER;
+    }
+
+    options = mp_dedicated_server_get_options();
+    return (options && options->queue_limit_per_peer > 0)
+        ? options->queue_limit_per_peer
+        : MAX_QUEUED_COMMANDS_PER_PLAYER;
+}
+
+static int command_rate_limit_exceeded(uint8_t player_id, uint32_t now_ms)
+{
+    uint32_t limit_per_sec;
+
+    if (player_id >= MP_MAX_PLAYERS) {
+        return 1;
+    }
+
+    limit_per_sec = command_rate_limit_per_sec();
+    if (limit_per_sec == 0) {
+        return 0;
+    }
+
+    if (bus.rate_window_start_ms[player_id] == 0 ||
+        now_ms < bus.rate_window_start_ms[player_id] ||
+        (now_ms - bus.rate_window_start_ms[player_id]) >= 1000u) {
+        bus.rate_window_start_ms[player_id] = now_ms;
+        bus.commands_in_window[player_id] = 0;
+    }
+
+    if (bus.commands_in_window[player_id] >= limit_per_sec) {
+        return 1;
+    }
+
+    bus.commands_in_window[player_id]++;
+    return 0;
+}
 
 static void seed_sequence_watermarks_from_registry(void)
 {
@@ -1002,6 +1062,7 @@ void multiplayer_command_bus_receive(uint8_t player_id,
                                      const uint8_t *data, uint32_t size)
 {
     mp_command cmd;
+    uint32_t now_ms;
     memset(&cmd, 0, sizeof(cmd));
     if (!mp_command_deserialize(&cmd, data, size)) {
         send_ack(player_id, 0, 0, MP_CMD_REJECT_INVALID);
@@ -1009,14 +1070,15 @@ void multiplayer_command_bus_receive(uint8_t player_id,
     }
     cmd.player_id = player_id; /* Override with verified peer player_id */
 
+    if (player_id >= MP_MAX_PLAYERS || cmd.sequence_id == 0) {
+        send_ack(player_id, cmd.sequence_id, 0, MP_CMD_REJECT_SEQUENCE_INVALID);
+        return;
+    }
+
     /* Check player is connected */
     mp_player *player = mp_player_registry_get(player_id);
     if (!player || player->connection_state == MP_CONNECTION_DISCONNECTED) {
         send_ack(player_id, cmd.sequence_id, 0, MP_CMD_REJECT_PLAYER_DISCONNECTED);
-        return;
-    }
-    if (player_id >= MP_MAX_PLAYERS || cmd.sequence_id == 0) {
-        send_ack(player_id, cmd.sequence_id, 0, MP_CMD_REJECT_SEQUENCE_INVALID);
         return;
     }
     if (cmd.sequence_id <= bus.last_sequence_by_player[player_id]) {
@@ -1026,9 +1088,29 @@ void multiplayer_command_bus_receive(uint8_t player_id,
         if (player) player->commands_rejected++;
         return;
     }
-    if (bus.queued_commands_by_player[player_id] >= MAX_QUEUED_COMMANDS_PER_PLAYER) {
-        MP_LOG_WARN("CMD", "Rejected rate-limited command from player %d seq=%u queued=%u",
-                    (int)player_id, cmd.sequence_id, bus.queued_commands_by_player[player_id]);
+
+    now_ms = net_tcp_get_timestamp_ms();
+    if (command_rate_limit_exceeded(player_id, now_ms)) {
+        bus.last_sequence_by_player[player_id] = cmd.sequence_id;
+        if (player) {
+            player->last_command_sequence_accepted = cmd.sequence_id;
+        }
+        MP_LOG_WARN("CMD", "Rejected rate-limited command from player %d seq=%u rate=%u/s",
+                    (int)player_id, cmd.sequence_id, command_rate_limit_per_sec());
+        send_ack(player_id, cmd.sequence_id, 0, MP_CMD_REJECT_RATE_LIMITED);
+        if (player) player->commands_rejected++;
+        return;
+    }
+
+    if (bus.queued_commands_by_player[player_id] >= command_queue_limit_per_player()) {
+        bus.last_sequence_by_player[player_id] = cmd.sequence_id;
+        if (player) {
+            player->last_command_sequence_accepted = cmd.sequence_id;
+        }
+        MP_LOG_WARN("CMD", "Rejected queue-limited command from player %d seq=%u queued=%u limit=%u",
+                    (int)player_id, cmd.sequence_id,
+                    bus.queued_commands_by_player[player_id],
+                    command_queue_limit_per_player());
         send_ack(player_id, cmd.sequence_id, 0, MP_CMD_REJECT_RATE_LIMITED);
         if (player) player->commands_rejected++;
         return;
@@ -1138,7 +1220,7 @@ const char *mp_command_bus_reject_reason_text(uint8_t reason)
         case MP_CMD_REJECT_ROUTE_ALREADY_DISABLED: return "Rota ja desabilitada";
         case MP_CMD_REJECT_PLAYER_DISCONNECTED: return "Jogador desconectado";
         case MP_CMD_REJECT_SEQUENCE_INVALID: return "Sequencia invalida";
-        case MP_CMD_REJECT_RATE_LIMITED: return "Muitas acoes em fila";
+        case MP_CMD_REJECT_RATE_LIMITED: return "Limite de acoes excedido";
         case MP_CMD_REJECT_SESSION_BUSY: return "Sessao ocupada";
         case MP_CMD_REJECT_RESOURCE_INVALID: return "Recurso invalido";
         case MP_CMD_REJECT_INVALID:

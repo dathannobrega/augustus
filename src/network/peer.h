@@ -34,6 +34,7 @@ typedef struct {
     uint8_t player_id;
     net_peer_state state;
     char name[NET_MAX_PLAYER_NAME];
+    char remote_address[48];
 
     /* Codec per peer for framing/sequencing */
     net_packet_codec codec;
@@ -63,6 +64,7 @@ typedef struct {
 void net_peer_init(net_peer *peer);
 void net_peer_reset(net_peer *peer);
 void net_peer_set_connected(net_peer *peer, int socket_fd, const char *name);
+void net_peer_set_remote_address(net_peer *peer, const char *address);
 void net_peer_set_player_id(net_peer *peer, uint8_t player_id);
 void net_peer_update_heartbeat_sent(net_peer *peer, uint32_t timestamp_ms,
                                     uint32_t sample_id);

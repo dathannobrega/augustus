@@ -36,6 +36,18 @@ void net_peer_set_connected(net_peer *peer, int socket_fd, const char *name)
     }
 }
 
+void net_peer_set_remote_address(net_peer *peer, const char *address)
+{
+    if (!peer) {
+        return;
+    }
+    peer->remote_address[0] = '\0';
+    if (address) {
+        strncpy(peer->remote_address, address, sizeof(peer->remote_address) - 1);
+        peer->remote_address[sizeof(peer->remote_address) - 1] = '\0';
+    }
+}
+
 void net_peer_set_player_id(net_peer *peer, uint8_t player_id)
 {
     peer->player_id = player_id;

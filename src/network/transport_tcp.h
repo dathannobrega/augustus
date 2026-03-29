@@ -18,6 +18,7 @@ void net_tcp_shutdown(void);
 
 /* Server operations */
 int net_tcp_listen(uint16_t port);
+int net_tcp_listen_on(const char *bind_address, uint16_t port);
 int net_tcp_accept(int listen_fd);
 void net_tcp_set_nonblocking(int socket_fd);
 
@@ -35,6 +36,7 @@ uint32_t net_tcp_get_timestamp_ms(void);
 
 /* Address info */
 int net_tcp_get_local_ip(char *buffer, size_t buffer_size);
+int net_tcp_get_peer_address(int socket_fd, char *buffer, size_t buffer_size);
 
 #endif /* ENABLE_MULTIPLAYER */
 

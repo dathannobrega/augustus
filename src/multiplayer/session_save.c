@@ -12,6 +12,7 @@
 #include "command_bus.h"
 #include "worldgen.h"
 #include "game_manifest.h"
+#include "dedicated_server.h"
 #include "mp_debug_log.h"
 #include "empire/city.h"
 #include "network/session.h"
@@ -463,7 +464,9 @@ int mp_session_load_from_buffer(const uint8_t *buffer, uint32_t size)
             manifest->save_version = header.version;
             manifest->session_seed = header.session_seed;
             manifest->player_count = header.player_count;
-            manifest->max_players = NET_MAX_PLAYERS;
+            manifest->max_players = mp_dedicated_server_is_enabled()
+                ? mp_dedicated_server_get_options()->max_players
+                : NET_MAX_PLAYERS;
             manifest->feature_flags = header.compat_flags;
             memcpy(manifest->world_instance_uuid, header.world_instance_uuid,
                    MP_WORLD_UUID_SIZE);

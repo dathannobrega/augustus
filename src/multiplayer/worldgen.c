@@ -429,7 +429,7 @@ void mp_worldgen_clear(void)
 int mp_worldgen_generate_player_spawns(uint32_t session_seed, int player_count,
                                         int use_xml_slots)
 {
-    if (player_count < 2 || player_count > MP_MAX_PLAYERS) {
+    if (player_count < 0 || player_count > MP_MAX_PLAYERS) {
         log_error("Invalid player count for worldgen", 0, player_count);
         return 0;
     }
@@ -437,6 +437,11 @@ int mp_worldgen_generate_player_spawns(uint32_t session_seed, int player_count,
     memset(&spawn_table, 0, sizeof(spawn_table));
     spawn_table.session_seed = session_seed;
     spawn_table.player_count = (uint8_t)player_count;
+
+    if (player_count == 0) {
+        log_info("Worldgen: initialized empty active-player spawn table", 0, 0);
+        return 1;
+    }
 
     prng_seed(session_seed);
 
@@ -651,13 +656,27 @@ int mp_worldgen_generate_reserved_spawns(int reserve_count)
     return spawn_table.reserved_count;
 }
 
+int mp_worldgen_generate_dynamic_city_pool(int pool_count)
+{
+    return mp_worldgen_generate_reserved_spawns(pool_count);
+}
+
 int mp_worldgen_assign_reserved_spawn(uint8_t slot_id)
 {
     for (int i = 0; i < spawn_table.reserved_count; i++) {
         if (spawn_table.reserved_spawns[i].valid) {
             int city_id = spawn_table.reserved_spawns[i].empire_city_id;
+            mp_spawn_entry activated = spawn_table.reserved_spawns[i];
             spawn_table.reserved_spawns[i].slot_id = slot_id;
             spawn_table.reserved_spawns[i].valid = 0; /* Mark as consumed */
+
+            if (spawn_table.spawn_count < MP_WORLDGEN_MAX_SPAWNS) {
+                activated.slot_id = slot_id;
+                activated.valid = 1;
+                spawn_table.spawns[spawn_table.spawn_count++] = activated;
+                spawn_table.player_count = spawn_table.spawn_count;
+            }
+
             log_info("Worldgen: assigned reserved spawn to slot", 0, (int)slot_id);
             return city_id;
         }
@@ -672,6 +691,23 @@ void mp_worldgen_return_to_reserved(int empire_city_id)
             spawn_table.reserved_spawns[i].empire_city_id == empire_city_id) {
             spawn_table.reserved_spawns[i].valid = 1;
             spawn_table.reserved_spawns[i].slot_id = 0xFF;
+
+            for (int s = 0; s < spawn_table.spawn_count; s++) {
+                if (spawn_table.spawns[s].valid &&
+                    spawn_table.spawns[s].empire_city_id == empire_city_id) {
+                    for (int move = s; move + 1 < spawn_table.spawn_count; move++) {
+                        spawn_table.spawns[move] = spawn_table.spawns[move + 1];
+                    }
+                    memset(&spawn_table.spawns[spawn_table.spawn_count - 1], 0,
+                           sizeof(spawn_table.spawns[spawn_table.spawn_count - 1]));
+                    spawn_table.spawn_count--;
+                    if (spawn_table.player_count > spawn_table.spawn_count) {
+                        spawn_table.player_count = spawn_table.spawn_count;
+                    }
+                    break;
+                }
+            }
+
             log_info("Worldgen: returned city to reserved pool", 0, empire_city_id);
             return;
         }
@@ -687,6 +723,11 @@ int mp_worldgen_get_reserved_count(void)
         }
     }
     return count;
+}
+
+int mp_worldgen_get_dynamic_city_pool_remaining(void)
+{
+    return mp_worldgen_get_reserved_count();
 }
 
 /* ---- Serialization ---- */

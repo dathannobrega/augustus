@@ -4,6 +4,7 @@
 int game_pre_init(void);
 
 int game_init(void);
+int game_init_headless_server(void);
 
 int game_init_editor(void);
 
@@ -18,5 +19,6 @@ void game_display_fps(int fps);
 void game_exit_editor(void);
 
 void game_exit(void);
+void game_exit_headless_server(void);
 
 #endif // GAME_GAME_H

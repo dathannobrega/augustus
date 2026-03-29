@@ -3,6 +3,9 @@
 #ifdef ENABLE_MULTIPLAYER
 
 #include "game_manifest.h"
+#include "server_rules.h"
+#include "dedicated_server.h"
+#include "frontend.h"
 #include "mp_trade_route.h"
 #include "mp_autosave.h"
 #include "trade_execution.h"
@@ -36,9 +39,6 @@
 #include "platform/file_manager.h"
 #include "core/log.h"
 #include "core/string.h"
-#include "window/city.h"
-#include "graphics/window.h"
-
 #include <string.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -147,6 +147,57 @@ static uint32_t generate_session_seed(void)
     srand((unsigned int)time(NULL));
     value = (uint32_t)rand() ^ ((uint32_t)rand() << 16);
     return value ? value : 1u;
+}
+
+static int bootstrap_has_local_player(void)
+{
+    return net_session_has_local_player();
+}
+
+static int bootstrap_active_player_count(void)
+{
+    int count = net_session_get_peer_count();
+    if (bootstrap_has_local_player()) {
+        count++;
+    }
+    return count;
+}
+
+static int bootstrap_player_id_start(void)
+{
+    return bootstrap_has_local_player() ? 1 : 0;
+}
+
+static uint8_t bootstrap_manifest_max_players(void)
+{
+    if (mp_dedicated_server_is_enabled()) {
+        const mp_dedicated_server_options *options = mp_dedicated_server_get_options();
+        if (options && options->max_players > 0) {
+            return options->max_players;
+        }
+    }
+    return NET_MAX_PLAYERS;
+}
+
+static int bootstrap_reserved_pool_target(int active_player_count)
+{
+    int max_players = (int)bootstrap_manifest_max_players();
+    int available = max_players - active_player_count;
+
+    if (available <= 0) {
+        return 0;
+    }
+
+    if (mp_dedicated_server_is_enabled()) {
+        const mp_dedicated_server_options *options = mp_dedicated_server_get_options();
+        int requested = options ? (int)options->dynamic_city_pool : available;
+        if (requested < 0) {
+            requested = 0;
+        }
+        return requested < available ? requested : available;
+    }
+
+    return available > 4 ? 4 : available;
 }
 
 static void finalize_late_join_transfer(void);
@@ -281,6 +332,12 @@ static void broadcast_join_barrier_event(uint16_t event_type, uint8_t player_id)
 
 int mp_bootstrap_host_start_game(void)
 {
+    uint8_t manifest_max_players;
+    int active_player_count;
+    int reserved_pool_target;
+    int required_capacity;
+    int player_count;
+
     if (!net_session_is_host()) {
         MP_LOG_ERROR("BOOT", "Only host can start the game");
         return 0;
@@ -295,7 +352,11 @@ int mp_bootstrap_host_start_game(void)
 
     /* 1. Build the manifest with real scenario hash */
     uint32_t seed = generate_session_seed();
-    int player_count = net_session_get_peer_count() + 1; /* +1 for host */
+    active_player_count = bootstrap_active_player_count();
+    manifest_max_players = bootstrap_manifest_max_players();
+    reserved_pool_target = bootstrap_reserved_pool_target(active_player_count);
+    required_capacity = active_player_count + reserved_pool_target;
+    player_count = required_capacity;
 
     uint32_t scenario_hash = 0;
     if (!mp_scenario_compute_file_hash(boot_data.scenario_name, &scenario_hash)) {
@@ -303,8 +364,8 @@ int mp_bootstrap_host_start_game(void)
     }
 
     mp_game_manifest_set(MP_GAME_MODE_SCENARIO, boot_data.scenario_name,
-                         scenario_hash, scenario_hash, 0, seed, NET_MAX_PLAYERS);
-    mp_game_manifest_set_player_count((uint8_t)player_count);
+                         scenario_hash, scenario_hash, 0, seed, manifest_max_players);
+    mp_game_manifest_set_player_count((uint8_t)active_player_count);
 
     /* Generate unique world instance UUID for this session */
     {
@@ -327,7 +388,7 @@ int mp_bootstrap_host_start_game(void)
                                           city_finance_tax_percentage());
 
     /* 3b. Validate scenario has enough eligible cities for player count */
-    if (!mp_scenario_validate_for_multiplayer(player_count)) {
+    if (required_capacity > 0 && !mp_scenario_validate_capacity(required_capacity)) {
         MP_LOG_ERROR("BOOT", "Scenario '%s' does not support %d players — aborting",
                      boot_data.scenario_name, player_count);
         boot_data.state = MP_BOOT_SCENARIO_SELECTED;
@@ -336,19 +397,19 @@ int mp_bootstrap_host_start_game(void)
 
     /* 4. Generate worldgen spawns */
     mp_worldgen_init();
-    if (!mp_worldgen_generate_player_spawns(seed, player_count, 1)) {
+    if (!mp_worldgen_generate_player_spawns(seed, active_player_count, 1)) {
         MP_LOG_ERROR("BOOT", "Worldgen failed: no valid spawn configuration");
         boot_data.state = MP_BOOT_SCENARIO_SELECTED;
         return 0;
     }
     mp_worldgen_lock();
 
-    /* 4b. Generate reserved spawns for late joiners */
-    {
-        int max_late = MP_MAX_PLAYERS - player_count;
-        if (max_late > 0) {
-            int reserve = max_late > 4 ? 4 : max_late;
-            mp_worldgen_generate_reserved_spawns(reserve);
+    /* 4b. Generate reserved spawns for late joiners / dedicated dynamic pool. */
+    if (reserved_pool_target > 0) {
+        int generated = mp_worldgen_generate_dynamic_city_pool(reserved_pool_target);
+        if (generated < reserved_pool_target) {
+            MP_LOG_WARN("BOOT", "Generated %d/%d pooled cities for future joins",
+                        generated, reserved_pool_target);
         }
     }
 
@@ -360,7 +421,7 @@ int mp_bootstrap_host_start_game(void)
 
     /* 7. Only after local preparation succeeds, ask clients to prepare too */
     {
-        uint8_t manifest_buf[256];
+        uint8_t manifest_buf[MP_GAME_MANIFEST_WIRE_MAX];
         uint32_t manifest_size = 0;
         mp_game_manifest_serialize(manifest_buf, &manifest_size);
 
@@ -372,7 +433,7 @@ int mp_bootstrap_host_start_game(void)
             }
         }
 
-        MP_LOG_INFO("BOOT", "GAME_PREPARE sent to %d peers", player_count - 1);
+        MP_LOG_INFO("BOOT", "GAME_PREPARE sent to %d peers", net_session_get_peer_count());
     }
 
     /* 8. Transition session to in-game state (sets peers to IN_GAME) */
@@ -407,11 +468,12 @@ int mp_bootstrap_host_start_game(void)
 
     /* 12. Transition to WINDOW_CITY */
     boot_data.state = MP_BOOT_IN_GAME;
-    window_city_show();
+    mp_frontend_enter_game();
 
     MP_LOG_INFO("BOOT", "=== Game started successfully ===");
-    MP_LOG_INFO("BOOT", "Scenario: '%s', Players: %d, Seed: %u",
-                boot_data.scenario_name, player_count, seed);
+    MP_LOG_INFO("BOOT", "Scenario: '%s', Active players: %d, Pool: %d, Seed: %u",
+                boot_data.scenario_name, active_player_count,
+                mp_worldgen_get_dynamic_city_pool_remaining(), seed);
 
     return 1;
 }
@@ -532,7 +594,7 @@ int mp_bootstrap_client_enter_game(void)
 
     /* Transition to gameplay */
     boot_data.state = MP_BOOT_IN_GAME;
-    window_city_show();
+    mp_frontend_enter_game();
 
     MP_LOG_INFO("BOOT", "=== Client entered game ===");
     return 1;
@@ -642,11 +704,14 @@ int mp_bootstrap_host_resume_game(void)
         return 0;
     }
 
+    mp_server_rules_apply_to_config();
+    mp_server_rules_capture_from_config();
+
     /* 2. Rebind stateless subsystems (preserves command bus seq and ticks) */
     mp_bootstrap_rebind_loaded_save();
 
-    /* 3. Mark host player as local and connected */
-    {
+    /* 3. Mark host player as local and connected when the host is also a player. */
+    if (bootstrap_has_local_player()) {
         uint8_t host_id = net_session_get_local_player_id();
         mp_player *host_player = mp_player_registry_get(host_id);
         if (host_player) {
@@ -664,8 +729,7 @@ int mp_bootstrap_host_resume_game(void)
                 mp_command_bus_get_next_sequence_id());
 
     /* 5. Open the resume lobby window */
-    extern void window_multiplayer_resume_lobby_show(void);
-    window_multiplayer_resume_lobby_show();
+    mp_frontend_show_resume_lobby();
 
     return 1;
 }
@@ -700,7 +764,7 @@ static void mp_bootstrap_host_finalize_resume(void)
 
     /* Transition to gameplay */
     boot_data.state = MP_BOOT_IN_GAME;
-    window_city_show();
+    mp_frontend_enter_game();
 
     MP_LOG_INFO("BOOT", "=== Resumed game launched successfully (tick=%u) ===",
                 mp_time_sync_get_authoritative_tick());
@@ -730,12 +794,12 @@ int mp_bootstrap_host_launch_resumed_game(void)
 
     /* 3. Build manifest with saved game mode */
     mp_game_manifest_set(MP_GAME_MODE_SAVED_GAME, boot_data.save_filename,
-                         0, 0, MP_SAVE_VERSION, 0, NET_MAX_PLAYERS);
+                         0, 0, MP_SAVE_VERSION, 0, bootstrap_manifest_max_players());
     mp_game_manifest_set_player_count((uint8_t)mp_player_registry_get_count());
 
     /* 4. Send GAME_PREPARE (manifest with save info) to all peers */
     {
-        uint8_t manifest_buf[256];
+        uint8_t manifest_buf[MP_GAME_MANIFEST_WIRE_MAX];
         uint32_t manifest_size = 0;
         mp_game_manifest_serialize(manifest_buf, &manifest_size);
 
@@ -910,7 +974,7 @@ static void finalize_reconnect_transfer(void)
 int mp_bootstrap_host_begin_reconnect(uint8_t peer_index, uint8_t player_id)
 {
     mp_game_manifest reconnect_manifest;
-    uint8_t manifest_buf[256];
+    uint8_t manifest_buf[MP_GAME_MANIFEST_WIRE_MAX];
     uint32_t manifest_size = 0;
     const char *checkpoint_path;
     net_session *sess;
@@ -1040,27 +1104,43 @@ int mp_bootstrap_host_handle_late_join(uint8_t peer_index, const char *player_na
     }
 
     /* 3. Register player in registry */
-    uint8_t new_player_id = 0;
-    for (int i = 1; i < MP_MAX_PLAYERS; i++) {
+    int new_player_id = -1;
+    for (int i = bootstrap_player_id_start(); i < MP_MAX_PLAYERS; i++) {
         mp_player *p = mp_player_registry_get((uint8_t)i);
         if (!p || !p->active) {
-            new_player_id = (uint8_t)i;
+            new_player_id = i;
             break;
         }
     }
-    if (new_player_id == 0) {
+    if (new_player_id < 0) {
         MP_LOG_ERROR("BOOT", "No free player ID for late join");
         reject_reason = NET_REJECT_SESSION_FULL;
         mp_join_transaction_rollback(txn);
+        mp_time_sync_set_join_barrier(0);
         broadcast_join_barrier_event(NET_EVENT_JOIN_BARRIER_RELEASED, 0);
         goto fail;
     }
 
-    mp_player_registry_add(new_player_id, player_name, 0, 0);
+    if (!mp_player_registry_add((uint8_t)new_player_id, player_name, 0, 0)) {
+        MP_LOG_ERROR("BOOT", "Failed to add late-join player to registry");
+        reject_reason = NET_REJECT_INTERNAL_ERROR;
+        mp_join_transaction_rollback(txn);
+        mp_time_sync_set_join_barrier(0);
+        broadcast_join_barrier_event(NET_EVENT_JOIN_BARRIER_RELEASED, 0);
+        goto fail;
+    }
     txn->registry_created = 1;
-    txn->player_id = new_player_id;
+    txn->player_id = (uint8_t)new_player_id;
 
-    int slot_id = mp_player_registry_assign_slot(new_player_id);
+    int slot_id = mp_player_registry_assign_slot((uint8_t)new_player_id);
+    if (slot_id < 0) {
+        MP_LOG_ERROR("BOOT", "Failed to assign slot for late-join player");
+        reject_reason = NET_REJECT_SESSION_FULL;
+        mp_join_transaction_rollback(txn);
+        mp_time_sync_set_join_barrier(0);
+        broadcast_join_barrier_event(NET_EVENT_JOIN_BARRIER_RELEASED, 0);
+        goto fail;
+    }
     txn->slot_id = (uint8_t)slot_id;
 
     /* 4. Assign reserved spawn */
@@ -1069,25 +1149,26 @@ int mp_bootstrap_host_handle_late_join(uint8_t peer_index, const char *player_na
         MP_LOG_ERROR("BOOT", "No reserved city available for late join");
         reject_reason = NET_REJECT_NO_RESERVED_SLOTS;
         mp_join_transaction_rollback(txn);
+        mp_time_sync_set_join_barrier(0);
         broadcast_join_barrier_event(NET_EVENT_JOIN_BARRIER_RELEASED, 0);
         goto fail;
     }
     txn->assigned_city_id = city_id;
 
     /* 5. Set ownership */
-    mp_ownership_set_city(city_id, MP_OWNER_REMOTE_PLAYER, new_player_id);
+    mp_ownership_set_city(city_id, MP_OWNER_REMOTE_PLAYER, (uint8_t)new_player_id);
     mp_ownership_set_city_online(city_id, 1);
     txn->ownership_created = 1;
 
-    mp_player_registry_set_city(new_player_id, city_id);
-    mp_player_registry_set_assigned_city(new_player_id, city_id);
+    mp_player_registry_set_city((uint8_t)new_player_id, city_id);
+    mp_player_registry_set_assigned_city((uint8_t)new_player_id, city_id);
 
     /* 6. Register in empire sync */
     {
         const mp_spawn_entry *spawn = mp_worldgen_get_spawn_for_slot((uint8_t)slot_id);
         int obj_id = spawn ? spawn->empire_object_id : -1;
         if (obj_id >= 0) {
-            mp_empire_sync_register_player_city(city_id, new_player_id, obj_id);
+            mp_empire_sync_register_player_city(city_id, (uint8_t)new_player_id, obj_id);
             txn->empire_sync_registered = 1;
         }
     }
@@ -1102,17 +1183,17 @@ int mp_bootstrap_host_handle_late_join(uint8_t peer_index, const char *player_na
 
             strncpy(mutable_peer->name, player_name, NET_MAX_PLAYER_NAME - 1);
             mutable_peer->name[NET_MAX_PLAYER_NAME - 1] = '\0';
-            net_peer_set_player_id(mutable_peer, new_player_id);
+            net_peer_set_player_id(mutable_peer, (uint8_t)new_player_id);
             mutable_peer->state = PEER_STATE_LOADING;
 
-            mp_player_registry_set_status(new_player_id, MP_PLAYER_IN_GAME);
-            mp_player_registry_set_connection_state(new_player_id, MP_CONNECTION_CONNECTED);
+            mp_player_registry_set_status((uint8_t)new_player_id, MP_PLAYER_IN_GAME);
+            mp_player_registry_set_connection_state((uint8_t)new_player_id, MP_CONNECTION_CONNECTED);
         }
     }
 
     /* 8. Send JOIN_ACCEPT */
     {
-        mp_player *player = mp_player_registry_get(new_player_id);
+        mp_player *player = mp_player_registry_get((uint8_t)new_player_id);
         const mp_game_manifest *manifest = mp_game_manifest_get();
         uint8_t world_uuid[MP_WORLD_UUID_SIZE] = {0};
         uint8_t accept_buf[160];
@@ -1123,7 +1204,7 @@ int mp_bootstrap_host_handle_late_join(uint8_t peer_index, const char *player_na
         }
 
         net_serializer_init(&as, accept_buf, sizeof(accept_buf));
-        net_write_u8(&as, new_player_id);
+        net_write_u8(&as, (uint8_t)new_player_id);
         net_write_u8(&as, (uint8_t)slot_id);
         net_write_u32(&as, net_session_get()->session_id);
         net_write_u32(&as, mp_worldgen_get_spawn_table()->session_seed);
@@ -1145,8 +1226,9 @@ int mp_bootstrap_host_handle_late_join(uint8_t peer_index, const char *player_na
     /* 9. Send GAME_PREPARE + save transfer + snapshot + GAME_START_FINAL */
     {
         /* Send manifest */
-        uint8_t manifest_buf[256];
+        uint8_t manifest_buf[MP_GAME_MANIFEST_WIRE_MAX];
         uint32_t manifest_size = 0;
+        mp_game_manifest_set_player_count((uint8_t)mp_player_registry_get_count());
         mp_game_manifest_serialize(manifest_buf, &manifest_size);
         net_session_send_to_peer(peer_index, NET_MSG_GAME_PREPARE,
                                  manifest_buf, manifest_size);
@@ -1160,7 +1242,7 @@ int mp_bootstrap_host_handle_late_join(uint8_t peer_index, const char *player_na
             reject_reason = NET_REJECT_INTERNAL_ERROR;
             mp_join_transaction_rollback(txn);
             mp_time_sync_set_join_barrier(0);
-            broadcast_join_barrier_event(NET_EVENT_JOIN_BARRIER_RELEASED, new_player_id);
+            broadcast_join_barrier_event(NET_EVENT_JOIN_BARRIER_RELEASED, (uint8_t)new_player_id);
             goto fail;
         }
 
@@ -1171,7 +1253,7 @@ int mp_bootstrap_host_handle_late_join(uint8_t peer_index, const char *player_na
             platform_file_manager_remove_file(checkpoint_path);
             mp_join_transaction_rollback(txn);
             mp_time_sync_set_join_barrier(0);
-            broadcast_join_barrier_event(NET_EVENT_JOIN_BARRIER_RELEASED, new_player_id);
+            broadcast_join_barrier_event(NET_EVENT_JOIN_BARRIER_RELEASED, (uint8_t)new_player_id);
             goto fail;
         }
 
@@ -1182,7 +1264,7 @@ int mp_bootstrap_host_handle_late_join(uint8_t peer_index, const char *player_na
     boot_data.late_join.transfer_in_progress = 1;
     boot_data.late_join.awaiting_load_complete = 0;
     boot_data.late_join.peer_index = peer_index;
-    boot_data.late_join.player_id = new_player_id;
+    boot_data.late_join.player_id = (uint8_t)new_player_id;
 
     /* Transaction start time for timeout tracking */
     txn->start_ms = net_tcp_get_timestamp_ms();

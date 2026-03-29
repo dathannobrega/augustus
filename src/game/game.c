@@ -140,6 +140,31 @@ int game_init(void)
     return 1;
 }
 
+int game_init_headless_server(void)
+{
+    if (!image_load_climate(CLIMATE_CENTRAL, 0, 1, 0)) {
+        errlog("unable to load main graphics");
+        return 0;
+    }
+    if (!image_load_enemy(ENEMY_0_BARBARIAN)) {
+        errlog("unable to load enemy graphics");
+        return 0;
+    }
+
+    model_reset();
+    building_properties_init();
+    load_claudius_messages();
+    game_state_init();
+    resource_init();
+
+    if (!platform_file_manager_is_directory_writeable(pref_user_dir())) {
+        errlog("user directory is not writable");
+        return 0;
+    }
+    platform_user_path_create_subdirectories();
+    return 1;
+}
+
 static int reload_language(int is_editor, int reload_images)
 {
     if (!lang_load(is_editor)) {
@@ -248,4 +273,13 @@ void game_exit(void)
     settings_save();
     config_save();
     sound_system_shutdown();
+}
+
+void game_exit_headless_server(void)
+{
+#ifdef ENABLE_MULTIPLAYER
+    multiplayer_runtime_shutdown();
+#endif
+    settings_save();
+    config_save();
 }

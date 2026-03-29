@@ -2,6 +2,7 @@
 
 #ifdef ENABLE_MULTIPLAYER
 
+#include "dedicated_server.h"
 #include "mp_debug_log.h"
 #include "core/dir.h"
 #include "core/log.h"
@@ -184,6 +185,14 @@ int mp_safe_file_write_autosave(const char *base_dir, int slot,
 
 const char *mp_safe_file_get_save_path(const char *filename)
 {
+    if (mp_dedicated_server_is_enabled() &&
+        mp_dedicated_server_get_save_dir() &&
+        mp_dedicated_server_get_save_dir()[0]) {
+        snprintf(path_buffer, sizeof(path_buffer), "%s/%s",
+                 mp_dedicated_server_get_save_dir(), filename);
+        return path_buffer;
+    }
+
     const char *dir = dir_append_location(filename, PATH_LOCATION_SAVEGAME);
     if (!dir) {
         return NULL;

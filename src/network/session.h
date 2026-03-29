@@ -10,6 +10,7 @@
 
 #define NET_DEFAULT_PORT    29073
 #define NET_DISCOVERY_PORT  29074
+#define NET_PLAYER_ID_NONE  0xFF
 
 typedef enum {
     NET_SESSION_IDLE = 0,
@@ -81,6 +82,7 @@ int net_session_is_host(void);
 int net_session_is_client(void);
 int net_session_is_in_game(void);
 int net_session_is_in_lobby(void);
+int net_session_has_local_player(void);
 net_session_state net_session_get_state(void);
 uint8_t net_session_get_local_player_id(void);
 uint32_t net_session_get_authoritative_tick(void);

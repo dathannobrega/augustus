@@ -3,16 +3,17 @@
 #ifdef ENABLE_MULTIPLAYER
 
 #include "bootstrap.h"
+#include "frontend.h"
 #include "join_transaction.h"
 #include "mp_autosave.h"
 #include "mp_debug_log.h"
+#include "server_rules.h"
 #include "trade_policy.h"
 #include "network/session.h"
 #include "network/transport_tcp.h"
 #include "network/discovery_lan.h"
 #include "scenario/empire.h"
 #include "core/log.h"
-#include "window/main_menu.h"
 
 static int runtime_initialized;
 static int was_in_game;
@@ -44,6 +45,7 @@ void multiplayer_runtime_update(void)
     /* 1. Session I/O (TCP handshake, data, heartbeats, timeouts) */
     if (was_active) {
         net_session_update();
+        mp_server_rules_apply_to_config();
         mp_trade_policy_update_local_runtime_state();
 
         /* Host: keep the announced session metadata in sync with reality */
@@ -68,7 +70,7 @@ void multiplayer_runtime_update(void)
 
         mp_bootstrap_reset();
         was_in_game = 0;
-        window_main_menu_show(1);
+        mp_frontend_return_to_menu(1);
     }
 
     /* 2. Discovery I/O (UDP announce/listen) — runs unconditionally.

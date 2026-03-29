@@ -86,16 +86,28 @@ int mp_scenario_validate_for_multiplayer(int player_count)
         return 0;
     }
 
-    int eligible = mp_scenario_count_eligible_cities();
+    return mp_scenario_validate_capacity(player_count);
+}
 
-    if (eligible < player_count) {
-        MP_LOG_ERROR("SCENARIO", "Scenario not viable for %d players: only %d eligible cities",
-                     player_count, eligible);
+int mp_scenario_validate_capacity(int required_city_count)
+{
+    if (required_city_count < 1 || required_city_count > 8) {
+        MP_LOG_ERROR("SCENARIO", "Invalid city capacity request: %d (must be 1-8)",
+                     required_city_count);
         return 0;
     }
 
-    MP_LOG_INFO("SCENARIO", "Scenario validated: %d eligible cities for %d players",
-                eligible, player_count);
+    int eligible = mp_scenario_count_eligible_cities();
+
+    if (eligible < required_city_count) {
+        MP_LOG_ERROR("SCENARIO",
+                     "Scenario not viable for %d multiplayer cities: only %d eligible cities",
+                     required_city_count, eligible);
+        return 0;
+    }
+
+    MP_LOG_INFO("SCENARIO", "Scenario validated: %d eligible cities for %d requested cities",
+                eligible, required_city_count);
     return 1;
 }
 

@@ -69,6 +69,7 @@ else()
 endif()
 
 set(CMAKE_C_STANDARD 99)
+option(BUILD_DEDICATED_SERVER "Build dedicated headless multiplayer server" OFF)
 
 if(CMAKE_COMPILER_IS_GNUCC OR MINGW)
     set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -Wall -Wextra -Wpedantic -Wno-unused-parameter -Wno-missing-field-initializers -Wno-sign-compare -Werror=implicit-function-declaration")
@@ -743,14 +744,17 @@ if(ENABLE_MULTIPLAYER)
         ${PROJECT_SOURCE_DIR}/src/multiplayer/worldgen.c
         ${PROJECT_SOURCE_DIR}/src/multiplayer/mp_debug_log.c
         ${PROJECT_SOURCE_DIR}/src/multiplayer/runtime.c
+        ${PROJECT_SOURCE_DIR}/src/multiplayer/frontend.c
         ${PROJECT_SOURCE_DIR}/src/multiplayer/bootstrap.c
         ${PROJECT_SOURCE_DIR}/src/multiplayer/game_manifest.c
+        ${PROJECT_SOURCE_DIR}/src/multiplayer/server_rules.c
         ${PROJECT_SOURCE_DIR}/src/multiplayer/scenario_selection.c
         ${PROJECT_SOURCE_DIR}/src/multiplayer/trade_policy.c
         ${PROJECT_SOURCE_DIR}/src/multiplayer/mp_trade_route.c
         ${PROJECT_SOURCE_DIR}/src/multiplayer/trade_execution.c
         ${PROJECT_SOURCE_DIR}/src/multiplayer/trade_log.c
         ${PROJECT_SOURCE_DIR}/src/multiplayer/mp_autosave.c
+        ${PROJECT_SOURCE_DIR}/src/multiplayer/dedicated_server.c
         ${PROJECT_SOURCE_DIR}/src/multiplayer/mp_safe_file.c
         ${PROJECT_SOURCE_DIR}/src/multiplayer/save_transfer.c
         ${PROJECT_SOURCE_DIR}/src/multiplayer/client_identity.c
@@ -860,6 +864,18 @@ else()
 endif()
 
 add_executable(${SHORT_NAME} WIN32 ${SOURCE_FILES})
+
+if(BUILD_DEDICATED_SERVER AND ENABLE_MULTIPLAYER AND UNIX AND NOT APPLE)
+    set(DEDICATED_SERVER_SOURCES ${SOURCE_FILES})
+    list(REMOVE_ITEM DEDICATED_SERVER_SOURCES
+        ${PROJECT_SOURCE_DIR}/src/platform/claudius.c
+        ${PROJECT_SOURCE_DIR}/res/claudius.rc
+    )
+    add_executable(claudius_server ${DEDICATED_SERVER_SOURCES}
+        ${PROJECT_SOURCE_DIR}/src/platform/dedicated_server_main.c)
+    set_target_properties(claudius_server PROPERTIES OUTPUT_NAME "claudius-server")
+    target_compile_definitions(claudius_server PRIVATE CLAUDIUS_DEDICATED_SERVER)
+endif()
 
 if(${TARGET_PLATFORM} STREQUAL "emscripten")
     set(CMAKE_EXECUTABLE_SUFFIX .html)
@@ -1043,16 +1059,28 @@ nx_create_nro (${PROJECT_NAME}
 else()
     if (UNIX AND NOT APPLE AND (CMAKE_COMPILER_IS_GNUCC OR CMAKE_C_COMPILER_ID STREQUAL "Clang"))
         target_link_libraries(${SHORT_NAME} m)
+        if(BUILD_DEDICATED_SERVER AND ENABLE_MULTIPLAYER AND UNIX AND NOT APPLE)
+            target_link_libraries(claudius_server m)
+        endif()
     endif()
     target_link_libraries(${SHORT_NAME} ${SDL2MAIN_LIBRARY} ${SDL2_LIBRARY} ${SDL2_MIXER_LIBRARY} ${EASYAV1_LIBRARY})
+    if(BUILD_DEDICATED_SERVER AND ENABLE_MULTIPLAYER AND UNIX AND NOT APPLE)
+        target_link_libraries(claudius_server ${SDL2MAIN_LIBRARY} ${SDL2_LIBRARY} ${SDL2_MIXER_LIBRARY} ${EASYAV1_LIBRARY})
+    endif()
     if(NOT APPLE)
         install(TARGETS ${SHORT_NAME} RUNTIME DESTINATION bin)
+        if(BUILD_DEDICATED_SERVER AND ENABLE_MULTIPLAYER AND UNIX AND NOT APPLE)
+            install(TARGETS claudius_server RUNTIME DESTINATION bin)
+        endif()
     endif()
 
     if(WIN32)
        target_link_libraries(${SHORT_NAME} dbghelp shlwapi)
        if(ENABLE_MULTIPLAYER)
            target_link_libraries(${SHORT_NAME} ws2_32 iphlpapi)
+           if(BUILD_DEDICATED_SERVER AND ENABLE_MULTIPLAYER AND UNIX AND NOT APPLE)
+               target_link_libraries(claudius_server ws2_32 iphlpapi)
+           endif()
        endif()
     endif()
 
