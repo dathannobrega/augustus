@@ -9,6 +9,7 @@
 #include "translation/translation.h"
 
 #include <stdlib.h>
+#include <stdio.h>
 #include <string.h>
 
 #define MAX_TEXT_ENTRIES 1000
@@ -42,6 +43,75 @@ static struct {
     lang_message message_entries[MAX_MESSAGE_ENTRIES];
     uint8_t message_data[MAX_MESSAGE_DATA];
 } data;
+
+static int headless_fallback_enabled;
+
+static const uint8_t *headless_rank_name(int index)
+{
+    static const char *const rank_names[] = {
+        "Citizen", "Clerk", "Engineer", "Architect", "Quaestor", "Procurator",
+        "Aedile", "Praetor", "Consul", "Proconsul", "Caesar", "Emperor"
+    };
+    if (index < 0 || index >= (int)(sizeof(rank_names) / sizeof(rank_names[0]))) {
+        return (const uint8_t *)"Rank";
+    }
+    return (const uint8_t *)rank_names[index];
+}
+
+static const uint8_t *headless_resource_name(int index)
+{
+    static const char *const resource_names[] = {
+        "None", "Wheat", "Vegetables", "Fruit", "Meat", "Fish",
+        "Clay", "Timber", "Olives", "Vines", "Iron", "Marble",
+        "Gold", "Sand", "Stone", "Pottery", "Furniture", "Oil",
+        "Wine", "Weapons", "Concrete", "Bricks", "Denarii", "Troops"
+    };
+    if (index < 0 || index >= (int)(sizeof(resource_names) / sizeof(resource_names[0]))) {
+        return (const uint8_t *)"Resource";
+    }
+    return (const uint8_t *)resource_names[index];
+}
+
+static const uint8_t *headless_city_name(int index)
+{
+    static uint8_t names[8][32];
+    static int next_slot;
+    uint8_t *buffer = names[next_slot];
+
+    next_slot = (next_slot + 1) % 8;
+    snprintf((char *)buffer, 32, "City %d", index);
+    return buffer;
+}
+
+static const uint8_t *headless_fallback_string(int group, int index)
+{
+    switch (group) {
+        case 1:
+            if (index == 1) {
+                return (const uint8_t *)"New Game";
+            }
+            break;
+        case 6:
+            if (index == 0) {
+                return (const uint8_t *)"Dn";
+            }
+            break;
+        case 9:
+            if (index == 5) {
+                return (const uint8_t *)"Player";
+            }
+            break;
+        case 21:
+            return headless_city_name(index);
+        case 23:
+            return headless_resource_name(index);
+        case 32:
+            return headless_rank_name(index);
+        default:
+            break;
+    }
+    return (const uint8_t *)"?";
+}
 
 static int file_exists_in_dir(const char *dir, const char *file)
 {
@@ -346,6 +416,7 @@ static int load_files(const char *text_filename, const char *message_filename, i
 
 int lang_load(int is_editor)
 {
+    headless_fallback_enabled = 0;
     if (is_editor) {
         return
             load_files(FILE_EDITOR_TEXT_RUS, FILE_EDITOR_MM_RUS, MAY_BE_LOCALIZED) ||
@@ -357,6 +428,12 @@ int lang_load(int is_editor)
         load_files(FILE_TEXT_RUS, FILE_MM_RUS, MUST_BE_LOCALIZED) ||
         load_files(FILE_TEXT_ENG, FILE_MM_ENG, NOT_LOCALIZED) ||
         load_files(FILE_TEXT_RUS, FILE_MM_RUS, NOT_LOCALIZED);
+}
+
+void lang_init_headless_server(void)
+{
+    memset(&data, 0, sizeof(data));
+    headless_fallback_enabled = 1;
 }
 
 const uint8_t *lang_get_string(int group, int index)
@@ -643,6 +720,10 @@ const uint8_t *lang_get_string(int group, int index)
             default:
                 break;
         }
+    }
+
+    if (headless_fallback_enabled) {
+        return headless_fallback_string(group, index);
     }
 
     const uint8_t *str = &data.text_data[data.text_entries[group].offset];

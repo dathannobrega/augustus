@@ -42,6 +42,8 @@
 #include "multiplayer/runtime.h"
 #endif
 
+static int headless_server_mode;
+
 static void errlog(const char *msg)
 {
     log_error(msg, 0, 0);
@@ -59,6 +61,7 @@ static encoding_type update_encoding(void)
 
 int game_pre_init(void)
 {
+    headless_server_mode = 0;
     settings_load();
     config_load();
     hotkey_config_load();
@@ -71,6 +74,23 @@ int game_pre_init(void)
         return 0;
     }
     update_encoding();
+    random_init();
+    return 1;
+}
+
+int game_pre_init_headless_server(void)
+{
+    headless_server_mode = 1;
+    settings_load();
+    config_load();
+    scenario_settings_init();
+    game_campaign_clear();
+    game_state_unpause();
+
+    locale_force_language(LANGUAGE_ENGLISH);
+    font_set_encoding(encoding_determine(LANGUAGE_ENGLISH));
+    translation_load(LANGUAGE_ENGLISH);
+    lang_init_headless_server();
     random_init();
     return 1;
 }
@@ -142,17 +162,7 @@ int game_init(void)
 
 int game_init_headless_server(void)
 {
-    if (!image_load_climate(CLIMATE_CENTRAL, 0, 1, 0)) {
-        errlog("unable to load main graphics");
-        return 0;
-    }
-    if (!image_load_enemy(ENEMY_0_BARBARIAN)) {
-        errlog("unable to load enemy graphics");
-        return 0;
-    }
-
     model_reset();
-    building_properties_init();
     load_claudius_messages();
     game_state_init();
     resource_init();
@@ -163,6 +173,11 @@ int game_init_headless_server(void)
     }
     platform_user_path_create_subdirectories();
     return 1;
+}
+
+int game_is_headless_server(void)
+{
+    return headless_server_mode;
 }
 
 static int reload_language(int is_editor, int reload_images)
@@ -280,6 +295,7 @@ void game_exit_headless_server(void)
 #ifdef ENABLE_MULTIPLAYER
     multiplayer_runtime_shutdown();
 #endif
+    headless_server_mode = 0;
     settings_save();
     config_save();
 }

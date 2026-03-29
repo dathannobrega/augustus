@@ -38,6 +38,7 @@ int mp_scenario_count_eligible_cities(void);
  */
 int mp_scenario_validate_for_multiplayer(int player_count);
 int mp_scenario_validate_capacity(int required_city_count);
+int mp_scenario_is_dedicated_compatible(const char *scenario_name);
 
 /**
  * Compute FNV-1a hash of a scenario file on disk.

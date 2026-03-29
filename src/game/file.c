@@ -36,6 +36,7 @@
 #include "game/campaign.h"
 #include "game/difficulty.h"
 #include "game/file_io.h"
+#include "game/game.h"
 #include "game/settings.h"
 #include "game/state.h"
 #include "game/time.h"
@@ -160,8 +161,10 @@ static void initialize_scenario_data(const uint8_t *scenario_name)
     map_tiles_update_all_walls();
     map_tiles_update_all_aqueducts(0);
 
-    // Load climate before to prevent climate related images blinking
-    image_load_climate(scenario_property_climate(), 0, 0, 0);
+    if (!game_is_headless_server()) {
+        /* Load climate before to prevent climate related images blinking */
+        image_load_climate(scenario_property_climate(), 0, 0, 0);
+    }
 
     map_natives_init();
 
@@ -198,7 +201,9 @@ static void initialize_scenario_data(const uint8_t *scenario_name)
     scenario_demand_change_init();
     scenario_price_change_init();
     building_menu_update();
-    image_load_enemy(scenario_property_enemy());
+    if (!game_is_headless_server()) {
+        image_load_enemy(scenario_property_enemy());
+    }
 
     city_data_init_scenario();
 
@@ -270,9 +275,11 @@ static void initialize_saved_game(void)
     }
     empire_city_update_trading_data(scenario_empire_id());
 
-    map_image_context_init();
-    map_image_clear();
-    map_image_update_all();
+    if (!game_is_headless_server()) {
+        map_image_context_init();
+        map_image_clear();
+        map_image_update_all();
+    }
 
     scenario_map_init();
 
@@ -289,7 +296,9 @@ static void initialize_saved_game(void)
     building_menu_update();
     city_message_init_problem_areas();
 
-    sound_city_init();
+    if (!game_is_headless_server()) {
+        sound_city_init();
+    }
 
     building_construction_clear_type();
     game_undo_disable();
@@ -298,8 +307,10 @@ static void initialize_saved_game(void)
     city_mission_tutorial_set_fire_message_shown(1);
     city_mission_tutorial_set_disease_message_shown(1);
 
-    image_load_climate(scenario_property_climate(), 0, 0, 0);
-    image_load_enemy(scenario_property_enemy());
+    if (!game_is_headless_server()) {
+        image_load_climate(scenario_property_climate(), 0, 0, 0);
+        image_load_enemy(scenario_property_enemy());
+    }
     city_military_determine_distant_battle_city();
 
     map_natives_check_land(0);
@@ -426,6 +437,19 @@ int game_file_start_scenario_from_buffer(uint8_t *data, int length, int is_save_
 
 int game_file_start_scenario_by_name(const uint8_t *scenario_name)
 {
+    if (game_is_headless_server()) {
+        if (start_scenario(scenario_name, get_scenario_filename(scenario_name, "mapx", 0))) {
+            return 1;
+        }
+        if (start_scenario(scenario_name, get_scenario_filename(scenario_name, "mapx", 1))) {
+            return 1;
+        }
+        if (start_scenario(scenario_name, get_scenario_filename(scenario_name, "map", 0))) {
+            return 1;
+        }
+        return start_scenario(scenario_name, get_scenario_filename(scenario_name, "map", 1));
+    }
+
     if (start_scenario(scenario_name, get_scenario_filename(scenario_name, "map", 0))) {
         return 1;
     }
@@ -453,7 +477,9 @@ int game_file_load_saved_game(const char *filename)
     initialize_saved_game();
     building_storage_reset_building_ids();
 
-    sound_music_update(1);
+    if (!game_is_headless_server()) {
+        sound_music_update(1);
+    }
     return 1;
 }
 

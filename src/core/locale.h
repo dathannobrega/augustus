@@ -35,6 +35,7 @@ typedef enum {
  * @return Guessed language
  */
 language_type locale_determine_language(void);
+void locale_force_language(language_type language);
 
 /**
  * if no language set before, returns LANGUAGE_UNKNOWN

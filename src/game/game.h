@@ -2,9 +2,11 @@
 #define GAME_GAME_H
 
 int game_pre_init(void);
+int game_pre_init_headless_server(void);
 
 int game_init(void);
 int game_init_headless_server(void);
+int game_is_headless_server(void);
 
 int game_init_editor(void);
 

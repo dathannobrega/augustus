@@ -145,6 +145,36 @@ static FILE *open_scenario_file(const char *scenario_name)
     return NULL;
 }
 
+int mp_scenario_is_dedicated_compatible(const char *scenario_name)
+{
+    uint8_t header[8];
+    size_t bytes_read;
+    FILE *fp;
+
+    if (!scenario_name || !scenario_name[0]) {
+        return 0;
+    }
+
+    fp = open_scenario_file(scenario_name);
+    if (!fp) {
+        MP_LOG_ERROR("SCENARIO", "Cannot find scenario file for dedicated server: '%s'",
+                     scenario_name);
+        return 0;
+    }
+
+    bytes_read = fread(header, 1, sizeof(header), fp);
+    file_close(fp);
+
+    if (bytes_read == sizeof(header) && memcmp(header, "VERSION\0", sizeof(header)) == 0) {
+        return 1;
+    }
+
+    MP_LOG_ERROR("SCENARIO",
+                 "Dedicated server requires a standalone versioned scenario: '%s' is legacy and depends on Caesar III data files",
+                 scenario_name);
+    return 0;
+}
+
 int mp_scenario_compute_file_hash(const char *scenario_name, uint32_t *out_hash)
 {
     if (!scenario_name || !scenario_name[0] || !out_hash) {

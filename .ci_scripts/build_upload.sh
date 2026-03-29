@@ -3,7 +3,30 @@
 set -e
 
 mkdir deploy
+mkdir -p dist
 build_dir="$(pwd)/build"
+
+copy_dedicated_scenarios() {
+  local source_dir="res/maps"
+  local target_dir="$1"
+  local copied=0
+
+  mkdir -p "$target_dir"
+
+  while IFS= read -r -d '' file; do
+    local header_hex
+    header_hex="$(od -An -tx1 -N8 "$file" | tr -d ' \n')"
+    if [[ "$header_hex" == "56455253494f4e00" ]]; then
+      cp "$file" "$target_dir/$(basename "$file")"
+      copied=1
+    fi
+  done < <(find "$source_dir" -maxdepth 1 -type f \( -name '*.map' -o -name '*.mapx' \) -print0)
+
+  if [[ "$copied" -eq 0 ]]; then
+    echo "No standalone versioned scenarios found for dedicated server packaging"
+    exit 1
+  fi
+}
 
 VERSION=$(cat res/version.txt)
 if [[ "$GITHUB_REF" =~ ^refs/tags/v ]]
@@ -22,6 +45,7 @@ else
 fi
 
 DEPLOY_FILE=
+UPLOAD_SOURCE=
 case "$DEPLOY" in
 "linux")
   PACKAGE=linux
@@ -30,17 +54,18 @@ case "$DEPLOY" in
   cp -r "${build_dir}/assets" "deploy/assets"
   cp -r "${build_dir}/maps" "deploy/maps"
   cp -r "${build_dir}/manual" "deploy/manual"
-  tar -czf "deploy/$DEPLOY_FILE" -C deploy claudius assets maps manual
+  tar -czf "dist/$DEPLOY_FILE" -C deploy claudius assets maps manual
+  UPLOAD_SOURCE="dist/$DEPLOY_FILE"
   ;;
 "linux-server")
   PACKAGE=linux-server
   DEPLOY_FILE=claudius-server-$VERSION-linux-x86_64.tar.gz
   cp "${build_dir}/claudius-server" "deploy/claudius-server"
   cp "claudius-server.ini" "deploy/claudius-server.ini"
-  cp -r "${build_dir}/assets" "deploy/assets"
-  cp -r "${build_dir}/maps" "deploy/maps"
-  cp -r "${build_dir}/manual" "deploy/manual"
-  tar -czf "deploy/$DEPLOY_FILE" -C deploy claudius-server claudius-server.ini assets maps manual
+  copy_dedicated_scenarios "deploy/scenarios"
+  mkdir -p "deploy/savegames"
+  tar -czf "dist/$DEPLOY_FILE" -C deploy claudius-server claudius-server.ini scenarios savegames
+  UPLOAD_SOURCE="dist/$DEPLOY_FILE"
   ;;
 "flatpak")
   PACKAGE=linux-flatpak
@@ -99,11 +124,16 @@ then
   exit
 fi
 
+if [ -z "$UPLOAD_SOURCE" ]
+then
+  UPLOAD_SOURCE="deploy/$DEPLOY_FILE"
+fi
+
 if [ -z "$UPLOAD_TOKEN" ]
 then
   echo "No upload token found - skipping upload"
   exit
 fi
 
-curl -u "$UPLOAD_TOKEN" -T deploy/$DEPLOY_FILE https://claudius.datan.com.br/upload/$REPO/$PACKAGE/$VERSION/$DEPLOY_FILE
+curl -u "$UPLOAD_TOKEN" -T "$UPLOAD_SOURCE" https://claudius.datan.com.br/upload/$REPO/$PACKAGE/$VERSION/$DEPLOY_FILE
 echo "Uploaded. URL: https://claudius.datan.com.br/$REPO.html" 

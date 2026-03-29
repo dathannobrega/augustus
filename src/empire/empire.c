@@ -23,6 +23,7 @@
 #include "network/session.h"
 #endif
 #include "game/campaign.h"
+#include "game/game.h"
 #include "game/save_version.h"
 #include "scenario/empire.h"
 
@@ -145,6 +146,21 @@ void empire_load(int is_custom_scenario, int empire_id)
 
     empire_reset_map();
     empire_set_coordinates(0, 0, 0);
+
+    if (game_is_headless_server()) {
+        data.initial_scroll_x = 0;
+        data.initial_scroll_y = 0;
+
+        if (empire_object_count() > 1) {
+            log_info("Headless server using embedded empire data", 0, empire_id);
+            return;
+        }
+
+        log_error("Headless server cannot load legacy empire data without embedded scenario/save empire objects",
+                  is_custom_scenario ? "c32.emp" : "c3.emp", empire_id);
+        empire_object_clear();
+        return;
+    }
 
     char raw_data[EMPIRE_DATA_SIZE];
     const char *filename = is_custom_scenario ? "c32.emp" : "c3.emp";

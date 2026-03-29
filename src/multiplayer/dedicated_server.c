@@ -66,6 +66,7 @@ void mp_dedicated_server_reset_options(void)
     options.pending_connections_per_ip = 2;
     strncpy(options.server_name, "Claudius Dedicated", sizeof(options.server_name) - 1);
     strncpy(options.listen_address, "0.0.0.0", sizeof(options.listen_address) - 1);
+    strncpy(options.save_dir, "savegames", sizeof(options.save_dir) - 1);
 }
 
 void mp_dedicated_server_set_options(const mp_dedicated_server_options *new_options)

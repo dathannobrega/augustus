@@ -85,6 +85,7 @@ int lang_dir_is_valid(const char *dir);
  * @return boolean true on success, false on failure
  */
 int lang_load(int is_editor);
+void lang_init_headless_server(void);
 void load_claudius_messages(void);
 
 /**

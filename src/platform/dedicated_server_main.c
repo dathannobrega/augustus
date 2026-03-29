@@ -12,11 +12,13 @@
 #include "multiplayer/game_manifest.h"
 #include "multiplayer/mp_autosave.h"
 #include "multiplayer/player_registry.h"
+#include "multiplayer/scenario_selection.h"
 #include "multiplayer/runtime.h"
 #include "multiplayer/server_rules.h"
 #include "multiplayer/worldgen.h"
 #include "network/session.h"
 #include "platform/file_manager.h"
+#include "platform/prefs.h"
 #include "platform/user_path.h"
 
 #include <ctype.h>
@@ -402,6 +404,12 @@ static int start_dedicated_session(void)
         return 0;
     }
 
+    if (!mp_scenario_is_dedicated_compatible(options->scenario_name)) {
+        fprintf(stderr,
+                "Dedicated server only supports standalone versioned scenarios packaged in ./scenarios or --resume-save.\n");
+        return 0;
+    }
+
     mp_bootstrap_set_scenario(options->scenario_name);
     return mp_bootstrap_host_start_game();
 }
@@ -439,8 +447,10 @@ int main(int argc, char **argv)
         return 1;
     }
 
-    if (!game_pre_init()) {
-        fprintf(stderr, "game_pre_init failed\n");
+    pref_save_user_dir(paths.data_dir);
+
+    if (!game_pre_init_headless_server()) {
+        fprintf(stderr, "game_pre_init_headless_server failed\n");
         SDL_Quit();
         return 1;
     }

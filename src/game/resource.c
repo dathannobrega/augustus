@@ -5,6 +5,7 @@
 #include "building/type.h"
 #include "core/image.h"
 #include "core/image_group_editor.h"
+#include "game/game.h"
 #include "game/save_version.h"
 #include "scenario/allowed_building.h"
 #include "scenario/property.h"
@@ -168,6 +169,25 @@ int resource_get_supply_chain_for_raw_material(resource_supply_chain *chain, res
 void resource_init(void)
 {
     memcpy(resource_info, resource_info_defaults, sizeof(resource_info_defaults));
+
+    if (game_is_headless_server()) {
+        for (int i = RESOURCE_MIN; i < RESOURCE_MAX; i++) {
+            resource_data *info = &resource_info[i];
+            info->text = lang_get_string(23, i);
+            info->image.storage = 0;
+            info->image.cart.single_load = 0;
+            info->image.cart.multiple_loads = 0;
+            info->image.cart.eight_loads = 0;
+            info->image.icon = 0;
+            info->image.empire = 0;
+            info->image.editor.icon = 0;
+            info->image.editor.empire = 0;
+        }
+        resource_info[RESOURCE_NONE].text = lang_get_string(23, 0);
+        resource_info[RESOURCE_DENARII].text = lang_get_string(23, 16);
+        resource_info[RESOURCE_TROOPS].text = lang_get_string(23, 17);
+        return;
+    }
     
     int food_index = 0;
     int good_index = 0;

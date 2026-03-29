@@ -113,6 +113,12 @@ language_type locale_determine_language(void)
     return data.last_determined_language;
 }
 
+void locale_force_language(language_type language)
+{
+    data.last_determined_language = language;
+    log_language();
+}
+
 language_type locale_last_determined_language(void)
 {
     if (!data.last_determined_language) {
