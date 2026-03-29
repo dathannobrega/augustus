@@ -221,8 +221,11 @@ static int selected_trade_view(trade_route_view *out);
 static trade_icon_type route_view_icon_type(const empire_city *city, const trade_route_view *route_view);
 static int should_show_trade_button_for_city(int city_id);
 #ifdef ENABLE_MULTIPLAYER
+static int authoritative_trade_view_for_city(int city_id, trade_route_view *out);
 static translation_key route_state_translation_key(int route_state);
 static font_t route_state_font(int route_state);
+static void compose_translated_name_label(translation_key prefix_key,
+    const char *ascii_name, uint8_t *buffer, int buffer_size);
 #endif
 static void draw_sidebar_city_item(const grid_box_item *item);
 static int draw_images_at_interval(int image_id, int x_draw_offset, int y_draw_offset,
@@ -1384,6 +1387,16 @@ static void draw_trade_city_info(const empire_object *object, const empire_city 
     if (!selected_trade_view(&route_view)) {
         return;
     }
+#ifdef ENABLE_MULTIPLAYER
+    if (net_session_is_active() && data.selected_city >= 0 &&
+        mp_ownership_is_city_remote_player(data.selected_city) &&
+        route_view.route_id < 0 && route_view.transport == TRADE_ICON_NONE) {
+        text_draw_centered(translation_for(TR_MP_EMPIRE_SYNCING),
+            data.panel.x_min, data.y_max - 72,
+            data.panel.x_max - data.panel.x_min, FONT_NORMAL_BROWN, 0);
+        return;
+    }
+#endif
     int y_offset = data.y_max - 113;
     const int safe_margin_left = data.panel.x_min + 50;
     const int safe_margin_right = data.panel.x_max - 50;
@@ -1440,6 +1453,22 @@ static void draw_sidebar_city_item(const grid_box_item *item)
     sidebar_city_entry *entry = &sidebar_cities[item->index];
     empire_city *city = empire_city_get(entry->city_id);
     trade_route_view route_view;
+#ifdef ENABLE_MULTIPLAYER
+    if (net_session_is_active()) {
+        if (!authoritative_trade_view_for_city(entry->city_id, &route_view)) {
+            memset(&route_view, 0, sizeof(route_view));
+            route_view.valid = 1;
+            route_view.route_id = empire_city_get_primary_legacy_route_id(entry->city_id);
+            route_view.counterpart_city_id = entry->city_id;
+            route_view.is_open = city->is_open;
+            route_view.transport = city->is_sea_trade ? TRADE_ICON_SEA : TRADE_ICON_LAND;
+            for (resource_type r = RESOURCE_MIN; r < RESOURCE_MAX; r++) {
+                route_view.counterpart_sells[r] = city->sells_resource[r];
+                route_view.counterpart_buys[r] = city->buys_resource[r];
+            }
+        }
+    } else
+#endif
     if (!trade_route_get_view_for_city_pair(local_trade_city_id(), entry->city_id, &route_view)) {
         memset(&route_view, 0, sizeof(route_view));
         route_view.valid = 1;
@@ -1486,12 +1515,16 @@ static void draw_sidebar_city_item(const grid_box_item *item)
     int badge_id = assets_get_image_id("UI", "Empire_sidebar_city_badge");
     int badge_width = image_get(badge_id)->width;
     trade_icon_type trade_icon = route_view_icon_type(city, &route_view);
-    int image_id = image_group(GROUP_EMPIRE_TRADE_ROUTE_TYPE) + 1 - trade_icon;
+    int has_trade_icon = trade_icon != TRADE_ICON_NONE;
+    int image_id = has_trade_icon
+        ? image_group(GROUP_EMPIRE_TRADE_ROUTE_TYPE) + 1 - trade_icon
+        : -1;
     int available_width = item_usable_width - data.sidebar.margin_right;
     int badge_and_icon_width = badge_width + 2 + 34;
     int badge_margin = 5;
     open_trade_button_style open_trade_style = get_open_trade_button_style(item->x, y_offset, TRADE_STYLE_SIDEBAR);
-    int draw_icon_on_top = !open_trade_button_icon_fits(city, &open_trade_style, trade_icon);
+    int draw_icon_on_top = has_trade_icon &&
+        !open_trade_button_icon_fits(city, &open_trade_style, trade_icon);
 
     if (badge_and_icon_width <= available_width) {
         // Everything fits
@@ -1499,7 +1532,7 @@ static void draw_sidebar_city_item(const grid_box_item *item)
 
         text_draw_ellipsized(name, x_offset + badge_margin + BLOCK_SIZE, y_offset + 9,
             item_usable_width - badge_width - 44, FONT_LARGE_BLACK, 0);
-        if (city->is_open || draw_icon_on_top) {
+        if (has_trade_icon && (city->is_open || draw_icon_on_top)) {
             //if city is open, draw trade route icon to remind of type, same if it doesnt fit in the button
             int trade_route_icon_offset = badge_width + BLOCK_SIZE;
             if ((trade_route_icon_offset + badge_margin + 2 + 34) <= item_usable_width) {
@@ -1514,7 +1547,7 @@ static void draw_sidebar_city_item(const grid_box_item *item)
         int city_name_end = text_draw_ellipsized(name, x_offset + badge_margin + BLOCK_SIZE, y_offset + 9,
             badge_width - BLOCK_SIZE - 8, FONT_LARGE_BLACK, 0);
         int icon_fits_in_badge = (city_name_end + badge_margin + 2 + 34) <= (x_offset + badge_margin + badge_width);
-        if (icon_fits_in_badge) {
+        if (has_trade_icon && icon_fits_in_badge) {
             image_draw(image_id, x_offset + badge_margin + city_name_end + BLOCK_SIZE + 2,
                        y_offset + 9 + 2 * trade_icon, COLOR_MASK_NONE, SCALE_NONE);
         }
@@ -1574,6 +1607,10 @@ static void draw_sidebar_city_item(const grid_box_item *item)
             }
             int state_x = x_offset + item_usable_width - 68;
             text_draw_ellipsized(translation_for(rkey), state_x, tag_y, 64, rfont, 0);
+        } else if (route_view.transport == TRADE_ICON_NONE) {
+            int state_x = x_offset + item_usable_width - 68;
+            text_draw_ellipsized(translation_for(TR_MP_EMPIRE_SYNCING),
+                state_x, tag_y, 64, FONT_NORMAL_BROWN, 0);
         }
     }
 #endif
@@ -1597,7 +1634,8 @@ static void draw_sidebar_city_item(const grid_box_item *item)
             action_type = TRADE_OPEN_ACTION_CREATE_P2P;
         }
 #endif
-        if (should_show_trade_button_for_city(entry->city_id)) {
+        if (should_show_trade_button_for_city(entry->city_id) &&
+            !(route_view.route_id < 0 && route_view.transport == TRADE_ICON_NONE)) {
             draw_open_trade_button(city, &route_view, entry->city_id, action_type,
                                    &open_trade_style_closed, trade_icon);
         }
@@ -2055,7 +2093,7 @@ static void draw_empire_object(const empire_object *obj)
             const empire_city *city = empire_city_get(city_id);
             trade_route_view route_view;
             if (city && city->type == EMPIRE_CITY_TRADE &&
-                trade_route_get_view_for_city_pair(local_trade_city_id(), city_id, &route_view) &&
+                authoritative_trade_view_for_city(city_id, &route_view) &&
                 route_view.route_id >= 0) {
                 mp_route_state rstate = (mp_route_state)route_view.state;
                 if (rstate == MP_ROUTE_STATE_DISABLED || rstate == MP_ROUTE_STATE_OFFLINE) {
@@ -2216,14 +2254,10 @@ static void draw_city_name(const empire_city *city)
                 mp_player *owner = mp_player_registry_get(owner_pid);
                 const char *owner_name = mp_player_registry_display_name(owner);
                 if (owner && owner->active && owner_name[0]) {
-                    /* "City of PlayerName" */
                     uint8_t display_buf[128];
-                    const uint8_t *prefix = translation_for(TR_MP_EMPIRE_CITY_OF);
-                    uint8_t *end = string_copy(prefix, display_buf, 128);
-                    int remaining = 128 - (int)(end - display_buf);
-                    if (remaining > 1) {
-                        string_copy(string_from_ascii(mp_player_registry_display_name(owner)), end, remaining);
-                    }
+                    compose_translated_name_label(TR_MP_EMPIRE_CITY_OF,
+                        mp_player_registry_display_name(owner),
+                        display_buf, sizeof(display_buf));
                     text_draw_centered_ellipsized(display_buf, x_offset, y_offset, 268, FONT_LARGE_BLACK, 0);
                 } else {
                     const uint8_t *city_name = empire_city_get_name(city);
@@ -2396,12 +2430,21 @@ static int selected_trade_view(trade_route_view *out)
     if (data.selected_city < 0) {
         return 0;
     }
+#ifdef ENABLE_MULTIPLAYER
+    if (net_session_is_active()) {
+        return authoritative_trade_view_for_city(data.selected_city, out);
+    }
+#endif
     return trade_route_get_view_for_city_pair(local_trade_city_id(), data.selected_city, out);
 }
 
 static trade_icon_type route_view_icon_type(const empire_city *city, const trade_route_view *route_view)
 {
     int transport = city ? city->is_sea_trade : 0;
+
+    if (route_view && route_view->valid && route_view->transport == TRADE_ICON_NONE) {
+        return TRADE_ICON_NONE;
+    }
 
     if (route_view && route_view->valid &&
         route_view->transport >= TRADE_ICON_LAND &&
@@ -2428,6 +2471,48 @@ static int should_show_trade_button_for_city(int city_id)
 }
 
 #ifdef ENABLE_MULTIPLAYER
+static int authoritative_trade_view_for_city(int city_id, trade_route_view *out)
+{
+    if (trade_route_get_view_for_city_pair(local_trade_city_id(), city_id, out)) {
+        return 1;
+    }
+    if (!out || city_id < 0 || !empire_city_is_player_owned(city_id)) {
+        return 0;
+    }
+
+    memset(out, 0, sizeof(*out));
+    out->valid = 1;
+    out->route_id = -1;
+    out->route_key = 0;
+    out->local_city_id = local_trade_city_id();
+    out->counterpart_city_id = city_id;
+    out->is_player_to_player = 1;
+    out->is_open = 0;
+    out->is_drawable = 0;
+    out->counterpart_online = mp_ownership_is_city_online(city_id);
+    out->transport = TRADE_ICON_NONE;
+    out->state = MP_ROUTE_STATE_INACTIVE;
+    return 1;
+}
+
+static void compose_translated_name_label(translation_key prefix_key,
+    const char *ascii_name, uint8_t *buffer, int buffer_size)
+{
+    uint8_t *cursor;
+    int remaining;
+
+    if (!buffer || buffer_size <= 0) {
+        return;
+    }
+
+    buffer[0] = '\0';
+    cursor = string_copy(translation_for(prefix_key), buffer, buffer_size);
+    remaining = buffer_size - (int)(cursor - buffer);
+    if (remaining > 1 && ascii_name && ascii_name[0]) {
+        string_copy(string_from_ascii(ascii_name), cursor, remaining);
+    }
+}
+
 static translation_key route_state_translation_key(int route_state)
 {
     switch (route_state) {
@@ -2756,13 +2841,16 @@ static void get_tooltip_trade_route_type(tooltip_context *c)
     data.selected_city = empire_city_get_for_object(selected_object - 1);
     const empire_city *city = empire_city_get(data.selected_city);
     trade_route_view route_view;
-    trade_icon_type icon_type = trade_route_get_view_for_city_pair(local_trade_city_id(),
-        data.selected_city, &route_view) ? route_view_icon_type(city, &route_view)
-                                         : route_view_icon_type(city, 0);
+    trade_icon_type icon_type = selected_trade_view(&route_view)
+        ? route_view_icon_type(city, &route_view)
+        : route_view_icon_type(city, 0);
     if (city->type != EMPIRE_CITY_TRADE || city->is_open) {
         return;
     }
     if (!should_show_trade_button_for_city(data.selected_city)) {
+        return;
+    }
+    if (icon_type == TRADE_ICON_NONE) {
         return;
     }
 

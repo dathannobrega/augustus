@@ -1,6 +1,7 @@
 #ifndef CORE_RANDOM_H
 #define CORE_RANDOM_H
 
+#include <stddef.h>
 #include <stdint.h>
 
 #include "core/buffer.h"
@@ -73,5 +74,6 @@ int random_from_stdlib(void);
 int random_between_from_stdlib(int min, int max);
 
 double random_fractional_from_stdlib(void);
+int random_fill_secure_bytes(uint8_t *out, size_t size);
 
 #endif // CORE_RANDOM_H

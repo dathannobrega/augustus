@@ -12,6 +12,9 @@
 #include "multiplayer/empire_sync.h"
 #include "multiplayer/time_sync.h"
 #include "multiplayer/worldgen.h"
+#include "multiplayer/checksum.h"
+#include "multiplayer/command_bus.h"
+#include "multiplayer/resync.h"
 #include "multiplayer/save_transfer.h"
 #include "multiplayer/snapshot.h"
 #include "multiplayer/join_transaction.h"
@@ -21,6 +24,7 @@
 #include "multiplayer/dedicated_server.h"
 #include "core/config.h"
 #include "core/log.h"
+#include "core/random.h"
 
 #include <string.h>
 #include <stdio.h>
@@ -41,6 +45,11 @@ static uint32_t join_correlation_id; /* Unique ID per join attempt for log corre
 static uint32_t heartbeat_sample_counter;
 
 #define NET_JOIN_TIMEOUT_MS 10000 /* 10 seconds to complete handshake */
+#define NET_HANDSHAKE_TRACK_MAX 32
+#define NET_HANDSHAKE_ATTEMPTS_PER_WINDOW_DEFAULT 8u
+#define NET_HANDSHAKE_WINDOW_MS_DEFAULT 10000u
+#define NET_HANDSHAKE_COOLDOWN_MS_DEFAULT 10000u
+#define NET_HANDSHAKE_PENDING_PER_IP_DEFAULT 2u
 
 /* Chat message ring buffer for client-side display */
 #define MP_CHAT_HISTORY_SIZE 64
@@ -59,42 +68,20 @@ static struct {
     int unread;
 } chat_history;
 
-static int fill_session_random_bytes(uint8_t *out, size_t size)
-{
-    size_t offset = 0;
+typedef struct {
+    int in_use;
+    char remote_address[48];
+    uint32_t window_start_ms;
+    uint32_t attempts_in_window;
+    uint32_t blocked_until_ms;
+} net_handshake_ip_state;
 
-    if (!out || size == 0) {
-        return 0;
-    }
-#if defined(_WIN32) && defined(_MSC_VER)
-    while (offset < size) {
-        unsigned int value = 0;
-        size_t chunk = size - offset;
-        if (chunk > sizeof(value)) {
-            chunk = sizeof(value);
-        }
-        if (rand_s(&value) != 0) {
-            break;
-        }
-        memcpy(out + offset, &value, chunk);
-        offset += chunk;
-    }
-#else
-    {
-        FILE *f = fopen("/dev/urandom", "rb");
-        if (f) {
-            offset = fread(out, 1, size, f);
-            fclose(f);
-        }
-    }
-#endif
-    return offset == size;
-}
+static net_handshake_ip_state handshake_ip_state[NET_HANDSHAKE_TRACK_MAX];
 
 static uint32_t generate_session_id(void)
 {
     uint32_t value = 0;
-    if (fill_session_random_bytes((uint8_t *)&value, sizeof(value))) {
+    if (random_fill_secure_bytes((uint8_t *)&value, sizeof(value))) {
         return value ? value : 1u;
     }
     srand((unsigned int)time(NULL));
@@ -136,6 +123,146 @@ static int session_host_uses_player_slot(void)
 static uint8_t first_assignable_player_id(void)
 {
     return session_host_uses_player_slot() ? 1 : 0;
+}
+
+static void reset_handshake_ip_state(void)
+{
+    memset(handshake_ip_state, 0, sizeof(handshake_ip_state));
+}
+
+static uint32_t handshake_attempts_per_window_limit(void)
+{
+    const mp_dedicated_server_options *options = mp_dedicated_server_get_options();
+    if (mp_dedicated_server_is_enabled() && options && options->handshake_attempts_per_window > 0) {
+        return options->handshake_attempts_per_window;
+    }
+    return NET_HANDSHAKE_ATTEMPTS_PER_WINDOW_DEFAULT;
+}
+
+static uint32_t handshake_window_ms_limit(void)
+{
+    const mp_dedicated_server_options *options = mp_dedicated_server_get_options();
+    if (mp_dedicated_server_is_enabled() && options && options->handshake_window_ms > 0) {
+        return options->handshake_window_ms;
+    }
+    return NET_HANDSHAKE_WINDOW_MS_DEFAULT;
+}
+
+static uint32_t handshake_cooldown_ms_limit(void)
+{
+    const mp_dedicated_server_options *options = mp_dedicated_server_get_options();
+    if (mp_dedicated_server_is_enabled() && options && options->handshake_cooldown_ms > 0) {
+        return options->handshake_cooldown_ms;
+    }
+    return NET_HANDSHAKE_COOLDOWN_MS_DEFAULT;
+}
+
+static uint32_t handshake_pending_per_ip_limit(void)
+{
+    const mp_dedicated_server_options *options = mp_dedicated_server_get_options();
+    if (mp_dedicated_server_is_enabled() && options && options->pending_connections_per_ip > 0) {
+        return options->pending_connections_per_ip;
+    }
+    return NET_HANDSHAKE_PENDING_PER_IP_DEFAULT;
+}
+
+static int handshake_count_pending_peers_for_address(const char *address)
+{
+    int pending = 0;
+
+    if (!address || !address[0]) {
+        return 0;
+    }
+
+    for (int i = 0; i < NET_MAX_PEERS; i++) {
+        net_peer *peer = &session.peers[i];
+        if (!peer->active) {
+            continue;
+        }
+        if (strcmp(peer->remote_address, address) != 0) {
+            continue;
+        }
+        if (peer->state == PEER_STATE_CONNECTING) {
+            pending++;
+        }
+    }
+
+    return pending;
+}
+
+static net_handshake_ip_state *find_or_alloc_handshake_state(const char *address)
+{
+    net_handshake_ip_state *candidate = NULL;
+
+    if (!address || !address[0]) {
+        return NULL;
+    }
+
+    for (int i = 0; i < NET_HANDSHAKE_TRACK_MAX; i++) {
+        if (handshake_ip_state[i].in_use &&
+            strcmp(handshake_ip_state[i].remote_address, address) == 0) {
+            return &handshake_ip_state[i];
+        }
+        if (!candidate && !handshake_ip_state[i].in_use) {
+            candidate = &handshake_ip_state[i];
+        }
+    }
+
+    if (!candidate) {
+        candidate = &handshake_ip_state[0];
+        for (int i = 1; i < NET_HANDSHAKE_TRACK_MAX; i++) {
+            if (handshake_ip_state[i].window_start_ms < candidate->window_start_ms) {
+                candidate = &handshake_ip_state[i];
+            }
+        }
+    }
+
+    memset(candidate, 0, sizeof(*candidate));
+    candidate->in_use = 1;
+    strncpy(candidate->remote_address, address, sizeof(candidate->remote_address) - 1);
+    candidate->remote_address[sizeof(candidate->remote_address) - 1] = '\0';
+    return candidate;
+}
+
+static int handshake_rate_limit_exceeded(const char *address, uint32_t now_ms)
+{
+    net_handshake_ip_state *state;
+    uint32_t window_ms;
+    uint32_t attempts_limit;
+
+    if (!address || !address[0]) {
+        return 0;
+    }
+
+    state = find_or_alloc_handshake_state(address);
+    if (!state) {
+        return 0;
+    }
+
+    if (state->blocked_until_ms != 0) {
+        if (now_ms < state->blocked_until_ms) {
+            return 1;
+        }
+        state->blocked_until_ms = 0;
+        state->attempts_in_window = 0;
+        state->window_start_ms = now_ms;
+    }
+
+    window_ms = handshake_window_ms_limit();
+    attempts_limit = handshake_attempts_per_window_limit();
+
+    if (state->window_start_ms == 0 || now_ms - state->window_start_ms >= window_ms) {
+        state->window_start_ms = now_ms;
+        state->attempts_in_window = 0;
+    }
+
+    if (state->attempts_in_window >= attempts_limit) {
+        state->blocked_until_ms = now_ms + handshake_cooldown_ms_limit();
+        return 1;
+    }
+
+    state->attempts_in_window++;
+    return 0;
 }
 
 static void copy_current_world_uuid(uint8_t *out_uuid)
@@ -348,8 +475,6 @@ static void handle_peer_disconnect(int peer_index)
     /* Phase 7: Check for incomplete join transaction and roll back */
     {
         mp_join_transaction *txn = mp_join_transaction_find_by_peer((uint8_t)peer_index);
-        extern void mp_bootstrap_host_cancel_late_join(uint8_t peer_index);
-        extern void mp_bootstrap_host_cancel_reconnect(uint8_t peer_index);
         if (txn && txn->active) {
             MP_LOG_INFO("SESSION", "Peer %d disconnected during join — rolling back transaction",
                         peer_index);
@@ -365,7 +490,6 @@ static void handle_peer_disconnect(int peer_index)
     mp_player *player = mp_player_registry_get(player_id);
     if (player && player->active) {
         if (session.state == NET_SESSION_HOSTING_LOBBY) {
-            extern int mp_bootstrap_is_resume(void);
             if (mp_bootstrap_is_resume()) {
                 uint32_t timeout_ticks = 3000;
                 mp_player_registry_mark_disconnected(player_id,
@@ -605,7 +729,6 @@ static int try_reconnect_player(net_peer *peer, const uint8_t *uuid,
                              mp_worldgen_get_spawn_table_mutable()->session_seed);
 
     {
-        extern int mp_bootstrap_host_begin_reconnect(uint8_t peer_index, uint8_t player_id);
         if (mp_bootstrap_host_begin_reconnect((uint8_t)peer_index, old_player_id)) {
             uint8_t event_buf[32];
             net_serializer es;
@@ -634,7 +757,6 @@ static int try_reconnect_player(net_peer *peer, const uint8_t *uuid,
     }
 
     /* Send full snapshot to reconnecting player so they can resync */
-    extern void multiplayer_resync_handle_request(uint8_t player_id);
     multiplayer_resync_handle_request(old_player_id);
     net_session_refresh_discovery_announcement();
 
@@ -657,6 +779,8 @@ static void handle_hello_impl(net_peer *peer, const uint8_t *payload, uint32_t s
     uint8_t requested_world_uuid[MP_WORLD_UUID_SIZE];
     uint32_t requested_resume_generation = 0;
     uint8_t current_world_uuid[MP_WORLD_UUID_SIZE];
+    uint8_t reject_buf[2];
+    net_serializer rs;
     int peer_index;
     int has_uuid;
     int reserved_slots;
@@ -740,6 +864,11 @@ static void handle_hello_impl(net_peer *peer, const uint8_t *payload, uint32_t s
 
     if (magic != NET_MAGIC || !net_protocol_check_version(version)) {
         reject_peer(peer, NET_REJECT_VERSION_MISMATCH, "protocol_mismatch");
+        return;
+    }
+
+    if (handshake_rate_limit_exceeded(peer->remote_address, net_tcp_get_timestamp_ms())) {
+        reject_peer(peer, NET_REJECT_RATE_LIMITED, "hello_rate_limited");
         return;
     }
 
@@ -1038,7 +1167,6 @@ static void handle_hello(net_peer *peer, const uint8_t *payload, uint32_t size)
 
     /* If in resume lobby, try reconnect by UUID */
     if (session.state == NET_SESSION_HOSTING_LOBBY) {
-        extern int mp_bootstrap_is_resume(void);
         if (mp_bootstrap_is_resume()) {
             int has_uuid = 0;
             for (int i = 0; i < 16; i++) {
@@ -1121,12 +1249,9 @@ static void handle_hello(net_peer *peer, const uint8_t *payload, uint32_t size)
 
         /* Phase 6: Try late join if reserved slots available */
         {
-            extern int mp_worldgen_get_reserved_count(void);
             if (mp_worldgen_get_reserved_count() > 0) {
                 MP_LOG_INFO("HANDSHAKE", "Attempting late join for '%s' — %d reserved slots available",
                             name, mp_worldgen_get_reserved_count());
-                extern void mp_bootstrap_host_handle_late_join(uint8_t peer_index,
-                    const char *player_name);
                 int peer_index = -1;
                 for (int i = 0; i < NET_MAX_PEERS; i++) {
                     if (&session.peers[i] == peer) {
@@ -1135,7 +1260,15 @@ static void handle_hello(net_peer *peer, const uint8_t *payload, uint32_t size)
                     }
                 }
                 if (peer_index >= 0) {
-                    mp_bootstrap_host_handle_late_join((uint8_t)peer_index, name);
+                    uint8_t reject_reason = NET_REJECT_NO_RESERVED_SLOTS;
+                    if (mp_bootstrap_host_handle_late_join((uint8_t)peer_index, name,
+                            &reject_reason)) {
+                        return;
+                    }
+                    net_serializer_init(&rs, reject_buf, sizeof(reject_buf));
+                    net_write_u8(&rs, reject_reason);
+                    send_raw_to_peer(peer, NET_MSG_JOIN_REJECT, reject_buf,
+                                     (uint32_t)net_serializer_position(&rs));
                     return;
                 }
             }
@@ -1314,8 +1447,6 @@ static void handle_client_message(net_peer *peer, const net_packet_header *heade
             break;
         }
         case NET_MSG_CLIENT_COMMAND: {
-            extern void multiplayer_command_bus_receive(uint8_t player_id,
-                                                       const uint8_t *data, uint32_t size);
             multiplayer_command_bus_receive(peer->player_id, payload, size);
             break;
         }
@@ -1341,13 +1472,10 @@ static void handle_client_message(net_peer *peer, const net_packet_header *heade
             break;
         }
         case NET_MSG_CHECKSUM_RESPONSE: {
-            extern void multiplayer_checksum_receive_response(uint8_t player_id,
-                                                              const uint8_t *data, uint32_t size);
             multiplayer_checksum_receive_response(peer->player_id, payload, size);
             break;
         }
         case NET_MSG_RESYNC_REQUEST: {
-            extern void multiplayer_resync_handle_request(uint8_t player_id);
             multiplayer_resync_handle_request(peer->player_id);
             mp_player *p = mp_player_registry_get(peer->player_id);
             if (p) {
@@ -1373,7 +1501,6 @@ static void handle_client_message(net_peer *peer, const net_packet_header *heade
             /* If this peer was in LOADING state (join barrier active),
              * transition to IN_GAME and release the barrier */
             if (peer->state == PEER_STATE_LOADING) {
-                extern void mp_bootstrap_host_complete_reconnect(uint8_t peer_index);
                 peer->state = PEER_STATE_IN_GAME;
                 mp_player_registry_set_status(peer->player_id, MP_PLAYER_IN_GAME);
 
@@ -1396,7 +1523,6 @@ static void handle_client_message(net_peer *peer, const net_packet_header *heade
                                                       (uint32_t)net_serializer_position(&es));
                     }
 
-                    extern void mp_bootstrap_host_complete_late_join(uint8_t peer_index);
                     mp_bootstrap_host_complete_late_join((uint8_t)(peer - session.peers));
                 } else {
                     mp_bootstrap_host_complete_reconnect((uint8_t)(peer - session.peers));
@@ -1568,6 +1694,7 @@ static void handle_host_message(const net_packet_header *header,
                     case NET_REJECT_RESUME_GENERATION_MISMATCH:
                         reason_str = "RESUME_GENERATION_MISMATCH";
                         break;
+                    case NET_REJECT_RATE_LIMITED: reason_str = "RATE_LIMITED"; break;
                     case NET_REJECT_INTERNAL_ERROR: reason_str = "INTERNAL_ERROR"; break;
                 }
                 MP_LOG_ERROR("HANDSHAKE", "[join:%04x] JOIN_REJECT received: reason=%s (%d)",
@@ -1602,32 +1729,26 @@ static void handle_host_message(const net_packet_header *header,
             break;
         }
         case NET_MSG_HOST_COMMAND_ACK: {
-            extern void multiplayer_command_bus_receive_ack(const uint8_t *data, uint32_t size);
             multiplayer_command_bus_receive_ack(payload, size);
             break;
         }
         case NET_MSG_FULL_SNAPSHOT: {
-            extern void multiplayer_snapshot_receive_full(const uint8_t *data, uint32_t size);
             multiplayer_snapshot_receive_full(payload, size);
             break;
         }
         case NET_MSG_DELTA_SNAPSHOT: {
-            extern void multiplayer_snapshot_receive_delta(const uint8_t *data, uint32_t size);
             multiplayer_snapshot_receive_delta(payload, size);
             break;
         }
         case NET_MSG_HOST_EVENT: {
-            extern void multiplayer_empire_sync_receive_event(const uint8_t *data, uint32_t size);
             multiplayer_empire_sync_receive_event(payload, size);
             break;
         }
         case NET_MSG_CHECKSUM_REQUEST: {
-            extern void multiplayer_checksum_handle_request(const uint8_t *data, uint32_t size);
             multiplayer_checksum_handle_request(payload, size);
             break;
         }
         case NET_MSG_RESYNC_GRANTED: {
-            extern void multiplayer_resync_apply_full_snapshot(const uint8_t *data, uint32_t size);
             multiplayer_resync_apply_full_snapshot(payload, size);
             break;
         }
@@ -1659,7 +1780,6 @@ static void handle_host_message(const net_packet_header *header,
             break;
         }
         case NET_MSG_GAME_PREPARE: {
-            extern int mp_bootstrap_client_prepare(const uint8_t *payload, uint32_t size);
             if (mp_bootstrap_client_prepare(payload, size)) {
                 if (mp_bootstrap_get_state() != MP_BOOT_SAVE_TRANSFER) {
                     uint8_t ack_buf[1];
@@ -1689,7 +1809,6 @@ static void handle_host_message(const net_packet_header *header,
                 session.authoritative_tick = net_read_u32(&s);
                 session.game_speed = net_read_u8(&s);
             }
-            extern int mp_bootstrap_client_enter_game(void);
             mp_bootstrap_client_enter_game();
             break;
         }
@@ -1704,7 +1823,6 @@ static void handle_host_message(const net_packet_header *header,
         case NET_MSG_SAVE_TRANSFER_COMPLETE: {
             mp_save_transfer_client_receive_complete(payload, size);
             /* Notify bootstrap that the save transfer is done */
-            extern void mp_bootstrap_client_save_transfer_complete(void);
             if (mp_save_transfer_get_state() == MP_TRANSFER_COMPLETE) {
                 mp_bootstrap_client_save_transfer_complete();
                 if (mp_bootstrap_get_state() == MP_BOOT_LOADED) {
@@ -1743,6 +1861,16 @@ static void host_accept_connections(void)
     }
 
     net_tcp_get_peer_address(client_fd, remote_address, sizeof(remote_address));
+
+    if (handshake_count_pending_peers_for_address(remote_address) >=
+        (int)handshake_pending_per_ip_limit()) {
+        net_peer temp_peer;
+        net_peer_init(&temp_peer);
+        net_peer_set_connected(&temp_peer, client_fd, "Pending");
+        net_peer_set_remote_address(&temp_peer, remote_address);
+        reject_peer(&temp_peer, NET_REJECT_RATE_LIMITED, "accept_pending_limit");
+        return;
+    }
 
     int slot = find_free_peer_slot();
     if (slot < 0) {
@@ -1898,6 +2026,7 @@ int net_session_init(void)
     join_reject_reason = 0;
     join_start_ms = 0;
     heartbeat_sample_counter = 0;
+    reset_handshake_ip_state();
     session.listen_fd = -1;
     session.udp_fd = -1;
     session.local_player_id = NET_PLAYER_ID_NONE;
@@ -2191,6 +2320,7 @@ void net_session_disconnect(void)
     join_status = preserved_join_status;
     join_reject_reason = preserved_reject_reason;
     join_start_ms = 0;
+    reset_handshake_ip_state();
     memset(&chat_history, 0, sizeof(chat_history));
     mp_player_registry_clear();
 

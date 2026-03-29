@@ -163,6 +163,11 @@ void building_storage_toggle_empty_all(int storage_id)
     array_item(storages, storage_id)->storage.empty_all ^= 1;
 }
 
+void building_storage_set_empty_all(int storage_id, int enabled)
+{
+    array_item(storages, storage_id)->storage.empty_all = enabled ? 1 : 0;
+}
+
 int building_storage_get_empty_all(int building_id)
 {
     building *b = building_get(building_id);
@@ -248,6 +253,89 @@ building_storage_state building_storage_get_state(building *b, int resource, int
     return BUILDING_STORAGE_STATE_NOT_ACCEPTING;
 }
 
+building_storage_state building_storage_get_next_state(building *b, resource_type resource_id,
+    int reverse_order)
+{
+    static const building_storage_state ordered[BUILDING_STORAGE_STATE_MAX] = {
+        BUILDING_STORAGE_STATE_NOT_ACCEPTING,
+        BUILDING_STORAGE_STATE_ACCEPTING,
+        BUILDING_STORAGE_STATE_GETTING,
+        BUILDING_STORAGE_STATE_MAINTAINING
+    };
+    building_storage_state current;
+    int idx = 0;
+
+    if (!b || !b->storage_id || resource_id < RESOURCE_MIN || resource_id >= RESOURCE_MAX) {
+        return BUILDING_STORAGE_STATE_NOT_ACCEPTING;
+    }
+
+    current = building_storage_get_state(b, resource_id, 0);
+    for (int i = 0; i < BUILDING_STORAGE_STATE_MAX; i++) {
+        if (ordered[i] == current) {
+            idx = i;
+            break;
+        }
+    }
+
+    if (reverse_order) {
+        idx = (idx - 1 + BUILDING_STORAGE_STATE_MAX) % BUILDING_STORAGE_STATE_MAX;
+    } else {
+        idx = (idx + 1) % BUILDING_STORAGE_STATE_MAX;
+    }
+
+    return ordered[idx];
+}
+
+int building_storage_get_next_quantity(building *b, resource_type resource_id,
+    int reverse_order)
+{
+    const building_storage *s;
+    const resource_storage_entry *entry;
+    int step;
+    int current;
+
+    if (!b || !b->storage_id || resource_id < RESOURCE_MIN || resource_id >= RESOURCE_MAX) {
+        return BUILDING_STORAGE_QUANTITY_MAX;
+    }
+
+    s = building_storage_get(b->storage_id);
+    entry = &s->resource_state[resource_id];
+    if (entry->state == BUILDING_STORAGE_STATE_NOT_ACCEPTING) {
+        return entry->quantity;
+    }
+
+    step = config_get(CONFIG_GP_STORAGE_INCREMENT_4) ? 4 : 8;
+    current = entry->quantity;
+
+    if (current > BUILDING_STORAGE_QUANTITY_MAX || current < step) {
+        return BUILDING_STORAGE_QUANTITY_MAX;
+    }
+
+    if (reverse_order) {
+        current -= step;
+        if (current < step) {
+            current = BUILDING_STORAGE_QUANTITY_MAX;
+        }
+    } else {
+        current += step;
+        if (current > BUILDING_STORAGE_QUANTITY_MAX) {
+            current = step;
+        }
+    }
+
+    return current;
+}
+
+int building_storage_is_quantity_valid(int quantity)
+{
+    int step = config_get(CONFIG_GP_STORAGE_INCREMENT_4) ? 4 : 8;
+
+    if (quantity < step || quantity > BUILDING_STORAGE_QUANTITY_MAX) {
+        return 0;
+    }
+    return (quantity % step) == 0;
+}
+
 resource_type building_storage_get_highest_quantity_resource(building *b)
 {
     unsigned char i;
@@ -309,6 +397,35 @@ void building_storage_set_permission(building_storage_permission_states p, build
     } else {
         *permissions &= ~permission_bit;
     }
+}
+
+int building_storage_is_permission_allowed(building_storage_permission_states p, building *b)
+{
+    return building_storage_get_permission(p, b);
+}
+
+void building_storage_set_permission_allowed(building_storage_permission_states p, building *b,
+    int allowed)
+{
+    building_storage_set_permission(p, b, allowed ? 0 : 1);
+}
+
+void building_storage_set_quantity(int storage_id, resource_type resource_id, int quantity)
+{
+    resource_storage_entry *entry;
+
+    if (storage_id <= 0 || (unsigned int)storage_id >= storages.size) {
+        return;
+    }
+    if (resource_id < RESOURCE_MIN || resource_id >= RESOURCE_MAX) {
+        return;
+    }
+    if (!building_storage_is_quantity_valid(quantity)) {
+        return;
+    }
+
+    entry = &array_item(storages, storage_id)->storage.resource_state[resource_id];
+    entry->quantity = (building_storage_quantity)quantity;
 }
 
 void building_storage_cycle_partial_resource_state(int storage_id, resource_type resource_id, int reverse_order)

@@ -26,6 +26,7 @@ static int route_city_supports_land_trade(int city_id)
         if (view) {
             return view->land_route_available;
         }
+        return 0;
     }
     return !city->is_sea_trade;
 }
@@ -42,6 +43,7 @@ static int route_city_supports_sea_trade(int city_id)
         if (view) {
             return view->dock_available && local_has_dock;
         }
+        return 0;
     }
     return city->is_sea_trade && local_has_dock;
 }
@@ -525,10 +527,10 @@ void trade_routes_load_state(buffer *trade_routes)
     }
     for (int i = 0; i < routes_to_load; i++) {
         trade_route *route = array_next(routes);
-        for (int i = 0; i < 2; i++) {
+        for (int dir = 0; dir < 2; dir++) {
             for (int r = 0; r < resource_total_mapped(); r++) {
                 resource_type remapped = resource_remap(r);
-                if (i) {
+                if (dir) {
                     route->buys.limit[remapped] = buffer_read_i32(trade_routes);
                     route->buys.traded[remapped] = buffer_read_i32(trade_routes);
                 } else {

@@ -23,6 +23,9 @@ static const char *COMMAND_NAMES[] = {
     "SET_RESOURCE_SETTING",
     "SET_STORAGE_STATE",
     "SET_STORAGE_PERMISSION",
+    "SET_STORAGE_QUANTITY",
+    "SET_STORAGE_EMPTY_ALL",
+    "SET_STORAGE_ALL_STATES",
     "CHAT_MESSAGE"
 };
 
@@ -95,14 +98,36 @@ void mp_command_serialize(const mp_command *cmd, uint8_t *buffer, uint32_t *size
             break;
 
         case MP_CMD_SET_STORAGE_STATE:
+            net_write_i32(&s, cmd->data.storage_state.city_id);
             net_write_i32(&s, cmd->data.storage_state.building_id);
             net_write_i32(&s, cmd->data.storage_state.resource);
             net_write_u8(&s, cmd->data.storage_state.new_state);
             break;
 
         case MP_CMD_SET_STORAGE_PERMISSION:
+            net_write_i32(&s, cmd->data.storage_permission.city_id);
             net_write_i32(&s, cmd->data.storage_permission.building_id);
             net_write_u8(&s, cmd->data.storage_permission.permission);
+            net_write_u8(&s, cmd->data.storage_permission.enabled);
+            break;
+
+        case MP_CMD_SET_STORAGE_QUANTITY:
+            net_write_i32(&s, cmd->data.storage_quantity.city_id);
+            net_write_i32(&s, cmd->data.storage_quantity.building_id);
+            net_write_i32(&s, cmd->data.storage_quantity.resource);
+            net_write_i32(&s, cmd->data.storage_quantity.quantity);
+            break;
+
+        case MP_CMD_SET_STORAGE_EMPTY_ALL:
+            net_write_i32(&s, cmd->data.storage_empty_all.city_id);
+            net_write_i32(&s, cmd->data.storage_empty_all.building_id);
+            net_write_u8(&s, cmd->data.storage_empty_all.enabled);
+            break;
+
+        case MP_CMD_SET_STORAGE_ALL_STATES:
+            net_write_i32(&s, cmd->data.storage_all_states.city_id);
+            net_write_i32(&s, cmd->data.storage_all_states.building_id);
+            net_write_u8(&s, cmd->data.storage_all_states.new_state);
             break;
 
         case MP_CMD_CHAT_MESSAGE:
@@ -194,14 +219,36 @@ int mp_command_deserialize(mp_command *cmd, const uint8_t *buffer, uint32_t size
             break;
 
         case MP_CMD_SET_STORAGE_STATE:
+            cmd->data.storage_state.city_id = net_read_i32(&s);
             cmd->data.storage_state.building_id = net_read_i32(&s);
             cmd->data.storage_state.resource = net_read_i32(&s);
             cmd->data.storage_state.new_state = net_read_u8(&s);
             break;
 
         case MP_CMD_SET_STORAGE_PERMISSION:
+            cmd->data.storage_permission.city_id = net_read_i32(&s);
             cmd->data.storage_permission.building_id = net_read_i32(&s);
             cmd->data.storage_permission.permission = net_read_u8(&s);
+            cmd->data.storage_permission.enabled = net_read_u8(&s);
+            break;
+
+        case MP_CMD_SET_STORAGE_QUANTITY:
+            cmd->data.storage_quantity.city_id = net_read_i32(&s);
+            cmd->data.storage_quantity.building_id = net_read_i32(&s);
+            cmd->data.storage_quantity.resource = net_read_i32(&s);
+            cmd->data.storage_quantity.quantity = net_read_i32(&s);
+            break;
+
+        case MP_CMD_SET_STORAGE_EMPTY_ALL:
+            cmd->data.storage_empty_all.city_id = net_read_i32(&s);
+            cmd->data.storage_empty_all.building_id = net_read_i32(&s);
+            cmd->data.storage_empty_all.enabled = net_read_u8(&s);
+            break;
+
+        case MP_CMD_SET_STORAGE_ALL_STATES:
+            cmd->data.storage_all_states.city_id = net_read_i32(&s);
+            cmd->data.storage_all_states.building_id = net_read_i32(&s);
+            cmd->data.storage_all_states.new_state = net_read_u8(&s);
             break;
 
         case MP_CMD_CHAT_MESSAGE:

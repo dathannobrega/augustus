@@ -4,6 +4,10 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <time.h>
+#if defined(_WIN32)
+#include <windows.h>
+#include <bcrypt.h>
+#endif
 
 #define MAX_RANDOM 100
 
@@ -119,4 +123,42 @@ int random_between_from_stdlib(int min, int max)
 double random_fractional_from_stdlib(void)
 {
     return (double) random_from_stdlib() / (double) RAND_MAX;
+}
+
+int random_fill_secure_bytes(uint8_t *out, size_t size)
+{
+    size_t offset = 0;
+
+    if (!out || size == 0) {
+        return 0;
+    }
+
+#if defined(_WIN32)
+    while (offset < size) {
+        ULONG chunk = (ULONG)(size - offset);
+        if (BCryptGenRandom(NULL, out + offset, chunk,
+                BCRYPT_USE_SYSTEM_PREFERRED_RNG) != 0) {
+            break;
+        }
+        offset += chunk;
+    }
+#else
+    {
+        FILE *f = fopen("/dev/urandom", "rb");
+        if (f) {
+            offset = fread(out, 1, size, f);
+            fclose(f);
+        }
+    }
+#endif
+
+    if (offset == size) {
+        return 1;
+    }
+
+    for (; offset < size; offset++) {
+        out[offset] = (uint8_t)(random_from_pool((int)offset) ^
+                                (uint8_t)(random_from_stdlib() & 0xFF));
+    }
+    return 1;
 }

@@ -116,6 +116,14 @@ static void apply_server_config_kv(mp_dedicated_server_options *options,
             options->command_rate_limit_per_sec = (uint32_t)strtoul(value, NULL, 10);
         } else if (strcmp(key, "queue_limit_per_peer") == 0) {
             options->queue_limit_per_peer = (uint32_t)strtoul(value, NULL, 10);
+        } else if (strcmp(key, "handshake_attempts_per_window") == 0) {
+            options->handshake_attempts_per_window = (uint32_t)strtoul(value, NULL, 10);
+        } else if (strcmp(key, "handshake_window_ms") == 0) {
+            options->handshake_window_ms = (uint32_t)strtoul(value, NULL, 10);
+        } else if (strcmp(key, "handshake_cooldown_ms") == 0) {
+            options->handshake_cooldown_ms = (uint32_t)strtoul(value, NULL, 10);
+        } else if (strcmp(key, "pending_connections_per_ip") == 0) {
+            options->pending_connections_per_ip = (uint32_t)strtoul(value, NULL, 10);
         } else if (strcmp(key, "banlist_path") == 0) {
             snprintf(options->banlist_path, sizeof(options->banlist_path), "%s", value);
         }

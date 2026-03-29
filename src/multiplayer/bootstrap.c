@@ -38,6 +38,7 @@
 #include "game/state.h"
 #include "platform/file_manager.h"
 #include "core/log.h"
+#include "core/random.h"
 #include "core/string.h"
 #include <string.h>
 #include <stdio.h>
@@ -64,38 +65,6 @@ static struct {
         uint8_t player_id;
     } reconnect;
 } boot_data;
-
-static int fill_boot_random_bytes(uint8_t *out, size_t size)
-{
-    size_t offset = 0;
-
-    if (!out || size == 0) {
-        return 0;
-    }
-#if defined(_WIN32) && defined(_MSC_VER)
-    while (offset < size) {
-        unsigned int value = 0;
-        size_t chunk = size - offset;
-        if (chunk > sizeof(value)) {
-            chunk = sizeof(value);
-        }
-        if (rand_s(&value) != 0) {
-            break;
-        }
-        memcpy(out + offset, &value, chunk);
-        offset += chunk;
-    }
-#else
-    {
-        FILE *f = fopen("/dev/urandom", "rb");
-        if (f) {
-            offset = fread(out, 1, size, f);
-            fclose(f);
-        }
-    }
-#endif
-    return offset == size;
-}
 
 void mp_bootstrap_init(void)
 {
@@ -141,7 +110,7 @@ const char *mp_bootstrap_get_scenario_name(void)
 static uint32_t generate_session_seed(void)
 {
     uint32_t value = 0;
-    if (fill_boot_random_bytes((uint8_t *)&value, sizeof(value))) {
+    if (random_fill_secure_bytes((uint8_t *)&value, sizeof(value))) {
         return value ? value : 1u;
     }
     srand((unsigned int)time(NULL));

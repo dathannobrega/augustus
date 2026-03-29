@@ -67,6 +67,7 @@ static struct {
     int route_exists;
     mp_route_state route_state;
     int remote_online;
+    int remote_trade_ready;
 
     /* Remote city trade settings */
     int remote_exportable[RESOURCE_MAX];
@@ -76,11 +77,29 @@ static struct {
     int sell_scroll;
     int buy_scroll;
 
-    char owner_name[32];
+    char owner_name[64];
     unsigned int focus_button_id;
 } data;
 
 /* ---- Helpers ---- */
+
+static void compose_translated_name_label(translation_key prefix_key,
+    const char *ascii_name, uint8_t *buffer, int buffer_size)
+{
+    uint8_t *cursor;
+    int remaining;
+
+    if (!buffer || buffer_size <= 0) {
+        return;
+    }
+
+    buffer[0] = '\0';
+    cursor = string_copy(translation_for(prefix_key), buffer, buffer_size);
+    remaining = buffer_size - (int)(cursor - buffer);
+    if (remaining > 1 && ascii_name && ascii_name[0]) {
+        string_copy(string_from_ascii(ascii_name), cursor, remaining);
+    }
+}
 
 static int find_local_player_city(void)
 {
@@ -133,6 +152,9 @@ static void clamp_scroll(int *scroll, int total)
 static void load_remote_trade_view(void)
 {
     data.remote_online = mp_ownership_is_city_online(data.remote_city_id);
+    data.remote_trade_ready = 0;
+    memset(data.remote_exportable, 0, sizeof(data.remote_exportable));
+    memset(data.remote_importable, 0, sizeof(data.remote_importable));
 
     const mp_city_trade_view *view = mp_empire_sync_get_trade_view(data.remote_city_id);
     if (view) {
@@ -140,13 +162,15 @@ static void load_remote_trade_view(void)
             data.remote_exportable[r] = view->exportable[r];
             data.remote_importable[r] = view->importable[r];
         }
+        data.remote_trade_ready = 1;
     } else {
         const empire_city *city = empire_city_get(data.remote_city_id);
-        if (city) {
+        if (city && !empire_city_is_player_owned(data.remote_city_id)) {
             for (int r = RESOURCE_MIN; r < RESOURCE_MAX; r++) {
                 data.remote_exportable[r] = city->sells_resource[r];
                 data.remote_importable[r] = city->buys_resource[r];
             }
+            data.remote_trade_ready = 1;
         }
     }
 }
@@ -266,13 +290,9 @@ static void draw_foreground(void)
 
     /* ---- Title: "Trade with [PlayerName]" ---- */
     {
-        const uint8_t *title_prefix = translation_for(TR_MP_P2P_TRADE_TITLE);
-        uint8_t title_buf[80];
-        uint8_t name_buf[40];
-        string_copy(string_from_ascii(data.owner_name), name_buf, 40);
-        int len = string_length(title_prefix);
-        string_copy(title_prefix, title_buf, 80);
-        string_copy(name_buf, title_buf + len, 80 - len);
+        uint8_t title_buf[128];
+        compose_translated_name_label(TR_MP_P2P_TRADE_TITLE,
+            data.owner_name, title_buf, sizeof(title_buf));
         text_draw_centered_ellipsized(title_buf, cx, cy + 12, DIALOG_W, FONT_LARGE_BLACK, 0);
     }
 
@@ -313,7 +333,10 @@ static void draw_foreground(void)
     inner_panel_draw(cx + RIGHT_PANEL_X, panel_y, PANEL_W_BLOCKS, PANEL_H_BLOCKS);
 
     /* ---- Left column: They Sell (partner's exports) ---- */
-    if (sell_count > 0) {
+    if (!data.remote_trade_ready) {
+        text_draw(translation_for(TR_MP_EMPIRE_SYNCING),
+            cx + LEFT_PANEL_X + 16, cy + LIST_CONTENT_Y + 4, FONT_NORMAL_BROWN, 0);
+    } else if (sell_count > 0) {
         for (int i = 0; i < VISIBLE_ROWS && i + data.sell_scroll < sell_count; i++) {
             int r = sell_list[i + data.sell_scroll];
             draw_resource_row(cx + LEFT_PANEL_X + 16,
@@ -326,7 +349,10 @@ static void draw_foreground(void)
     }
 
     /* ---- Right column: They Buy (partner's imports) ---- */
-    if (buy_count > 0) {
+    if (!data.remote_trade_ready) {
+        text_draw(translation_for(TR_MP_EMPIRE_SYNCING),
+            cx + RIGHT_PANEL_X + 16, cy + LIST_CONTENT_Y + 4, FONT_NORMAL_BROWN, 0);
+    } else if (buy_count > 0) {
         for (int i = 0; i < VISIBLE_ROWS && i + data.buy_scroll < buy_count; i++) {
             int r = buy_list[i + data.buy_scroll];
             draw_resource_row(cx + RIGHT_PANEL_X + 16,
@@ -351,7 +377,7 @@ static void draw_foreground(void)
 
     /* Create route button (if no route) */
     if (!data.route_exists) {
-        if (data.remote_online && data.local_city_id >= 0) {
+        if (data.remote_online && data.local_city_id >= 0 && data.remote_trade_ready) {
             int btn_x = cx + (DIALOG_W - 200) / 2;
             button_border_draw(btn_x, bottom_y, 200, 26, data.focus_button_id == 1);
             text_draw_centered(translation_for(TR_MP_P2P_TRADE_CREATE_ROUTE),
@@ -360,6 +386,9 @@ static void draw_foreground(void)
         } else if (!data.remote_online) {
             text_draw_centered(translation_for(TR_MP_P2P_TRADE_CITY_OFFLINE),
                 cx + 160, bottom_y + 5, DIALOG_W - 176, FONT_NORMAL_RED, 0);
+        } else {
+            text_draw_centered(translation_for(TR_MP_EMPIRE_SYNCING),
+                cx + 160, bottom_y + 5, DIALOG_W - 176, FONT_NORMAL_BROWN, 0);
         }
     }
 

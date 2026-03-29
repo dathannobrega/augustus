@@ -16,48 +16,6 @@ static struct {
     uint8_t slot_assigned[MP_MAX_PLAYERS]; /* 1 if slot is taken */
 } registry;
 
-static int fill_secure_random_bytes(uint8_t *out, size_t size)
-{
-    size_t offset = 0;
-
-    if (!out || size == 0) {
-        return 0;
-    }
-
-#if defined(_WIN32) && defined(_MSC_VER)
-    while (offset < size) {
-        unsigned int value = 0;
-        size_t chunk = size - offset;
-        if (chunk > sizeof(value)) {
-            chunk = sizeof(value);
-        }
-        if (rand_s(&value) != 0) {
-            break;
-        }
-        memcpy(out + offset, &value, chunk);
-        offset += chunk;
-    }
-#else
-    {
-        FILE *f = fopen("/dev/urandom", "rb");
-        if (f) {
-            offset = fread(out, 1, size, f);
-            fclose(f);
-        }
-    }
-#endif
-
-    if (offset == size) {
-        return 1;
-    }
-
-    for (; offset < size; offset++) {
-        out[offset] = (uint8_t)(random_from_pool((int)offset) ^
-                                (uint8_t)(random_from_stdlib() & 0xFF));
-    }
-    return 1;
-}
-
 static int secure_token_equals(const uint8_t *a, const uint8_t *b, size_t size)
 {
     uint8_t diff = 0;
@@ -75,7 +33,7 @@ static int secure_token_equals(const uint8_t *a, const uint8_t *b, size_t size)
 
 void mp_player_registry_generate_uuid(uint8_t *out_uuid)
 {
-    fill_secure_random_bytes(out_uuid, MP_PLAYER_UUID_SIZE);
+    random_fill_secure_bytes(out_uuid, MP_PLAYER_UUID_SIZE);
     /* Set version 4 (random) */
     out_uuid[6] = (out_uuid[6] & 0x0F) | 0x40;
     /* Set variant 1 */
@@ -105,7 +63,7 @@ void mp_player_registry_uuid_to_string(const uint8_t *uuid, char *out, int out_s
 
 static void generate_reconnect_token(uint8_t *token)
 {
-    fill_secure_random_bytes(token, MP_RECONNECT_TOKEN_SIZE);
+    random_fill_secure_bytes(token, MP_RECONNECT_TOKEN_SIZE);
 }
 
 /* ---- Init / Clear ---- */

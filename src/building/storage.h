@@ -159,6 +159,11 @@ const building_storage *building_storage_get(int storage_id);
  * @return Read-only storage state
  */
 building_storage_state building_storage_get_state(building *b, int resource, int relative);
+building_storage_state building_storage_get_next_state(building *b, resource_type resource_id,
+    int reverse_order);
+int building_storage_get_next_quantity(building *b, resource_type resource_id,
+    int reverse_order);
+int building_storage_is_quantity_valid(int quantity);
 
 /**
  * Sets values of a building storage to that of another building storage
@@ -226,6 +231,7 @@ int building_storage_check_if_accepts_nothing(int storage_id);
  * @param storage_id Storage id
  */
 void building_storage_toggle_empty_all(int storage_id);
+void building_storage_set_empty_all(int storage_id, int enabled);
 
 /**
  * Check the empty all flag for the storage
@@ -283,6 +289,10 @@ int building_storage_get_amount(building *b, resource_type resource);
 void building_storage_toggle_permission(building_storage_permission_states p, building *b);
 int building_storage_get_permission(building_storage_permission_states p, building *b);
 void building_storage_set_permission(building_storage_permission_states p, building *b, int enable);
+int building_storage_is_permission_allowed(building_storage_permission_states p, building *b);
+void building_storage_set_permission_allowed(building_storage_permission_states p, building *b,
+    int allowed);
+void building_storage_set_quantity(int storage_id, resource_type resource_id, int quantity);
 building_storage_permission_states building_storage_get_permission_from_building_type(building_type type);
 
 #endif // BUILDING_STORAGE_H

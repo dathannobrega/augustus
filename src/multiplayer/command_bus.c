@@ -21,6 +21,7 @@
 #include "building/building.h"
 #include "building/count.h"
 #include "building/storage.h"
+#include "city/resource.h"
 #include "empire/city.h"
 #include "empire/trade_route.h"
 #include "game/resource.h"
@@ -427,6 +428,33 @@ static int validate_set_route_limit(const mp_command *cmd)
     return MP_CMD_REJECT_NONE;
 }
 
+static int validate_storage_scope(const mp_command *cmd, int city_id, int building_id)
+{
+    if (city_id < 0) {
+        return MP_CMD_REJECT_CITY_NOT_FOUND;
+    }
+    if (!mp_ownership_player_owns_city(cmd->player_id, city_id)) {
+        return MP_CMD_REJECT_CITY_NOT_OWNED;
+    }
+    if (!mp_ownership_resolve_storage_scope(cmd->player_id, city_id, building_id, 0)) {
+        MP_LOG_WARN("CMD", "Rejected storage command for player %d city=%d building=%d",
+                    (int)cmd->player_id, city_id, building_id);
+        return MP_CMD_REJECT_NOT_OWNER;
+    }
+    return MP_CMD_REJECT_NONE;
+}
+
+static int validate_session_control_command(const mp_command *cmd)
+{
+    if (!cmd) {
+        return MP_CMD_REJECT_INVALID;
+    }
+    if (mp_dedicated_server_is_enabled()) {
+        return MP_CMD_REJECT_FORBIDDEN;
+    }
+    return MP_CMD_REJECT_NONE;
+}
+
 static int validate_command(const mp_command *cmd)
 {
     if ((mp_time_sync_is_join_barrier_active() ||
@@ -511,8 +539,13 @@ static int validate_command(const mp_command *cmd)
         }
 
         case MP_CMD_SET_STORAGE_STATE: {
+            int reject = validate_storage_scope(cmd, cmd->data.storage_state.city_id,
+                                                cmd->data.storage_state.building_id);
             int bid = cmd->data.storage_state.building_id;
             building *b = building_get(bid);
+            if (reject != MP_CMD_REJECT_NONE) {
+                return reject;
+            }
             if (!b || b->state != BUILDING_STATE_IN_USE) {
                 return MP_CMD_REJECT_CITY_NOT_FOUND;
             }
@@ -530,8 +563,13 @@ static int validate_command(const mp_command *cmd)
         }
 
         case MP_CMD_SET_STORAGE_PERMISSION: {
+            int reject = validate_storage_scope(cmd, cmd->data.storage_permission.city_id,
+                                                cmd->data.storage_permission.building_id);
             int bid = cmd->data.storage_permission.building_id;
             building *b = building_get(bid);
+            if (reject != MP_CMD_REJECT_NONE) {
+                return reject;
+            }
             if (!b || b->state != BUILDING_STATE_IN_USE) {
                 return MP_CMD_REJECT_CITY_NOT_FOUND;
             }
@@ -541,12 +579,85 @@ static int validate_command(const mp_command *cmd)
             if (cmd->data.storage_permission.permission > BUILDING_STORAGE_PERMISSION_CAESAR) {
                 return MP_CMD_REJECT_INVALID;
             }
+            if (cmd->data.storage_permission.enabled > 1) {
+                return MP_CMD_REJECT_INVALID;
+            }
+            return MP_CMD_REJECT_NONE;
+        }
+
+        case MP_CMD_SET_STORAGE_QUANTITY: {
+            int reject = validate_storage_scope(cmd, cmd->data.storage_quantity.city_id,
+                                                cmd->data.storage_quantity.building_id);
+            int bid = cmd->data.storage_quantity.building_id;
+            building *b = building_get(bid);
+            int res = cmd->data.storage_quantity.resource;
+            int quantity = cmd->data.storage_quantity.quantity;
+            if (reject != MP_CMD_REJECT_NONE) {
+                return reject;
+            }
+            if (!b || b->state != BUILDING_STATE_IN_USE) {
+                return MP_CMD_REJECT_CITY_NOT_FOUND;
+            }
+            if (b->type != BUILDING_WAREHOUSE && b->type != BUILDING_GRANARY) {
+                return MP_CMD_REJECT_INVALID;
+            }
+            if (res < RESOURCE_MIN || res >= RESOURCE_MAX) {
+                return MP_CMD_REJECT_RESOURCE_INVALID;
+            }
+            if (building_storage_get_state(b, res, 0) == BUILDING_STORAGE_STATE_NOT_ACCEPTING) {
+                return MP_CMD_REJECT_INVALID;
+            }
+            if (!building_storage_is_quantity_valid(quantity)) {
+                return MP_CMD_REJECT_INVALID;
+            }
+            return MP_CMD_REJECT_NONE;
+        }
+
+        case MP_CMD_SET_STORAGE_EMPTY_ALL: {
+            int reject = validate_storage_scope(cmd, cmd->data.storage_empty_all.city_id,
+                                                cmd->data.storage_empty_all.building_id);
+            int bid = cmd->data.storage_empty_all.building_id;
+            building *b = building_get(bid);
+            if (reject != MP_CMD_REJECT_NONE) {
+                return reject;
+            }
+            if (!b || b->state != BUILDING_STATE_IN_USE) {
+                return MP_CMD_REJECT_CITY_NOT_FOUND;
+            }
+            if (b->type != BUILDING_WAREHOUSE && b->type != BUILDING_GRANARY) {
+                return MP_CMD_REJECT_INVALID;
+            }
+            if (cmd->data.storage_empty_all.enabled > 1) {
+                return MP_CMD_REJECT_INVALID;
+            }
+            return MP_CMD_REJECT_NONE;
+        }
+
+        case MP_CMD_SET_STORAGE_ALL_STATES: {
+            int reject = validate_storage_scope(cmd, cmd->data.storage_all_states.city_id,
+                                                cmd->data.storage_all_states.building_id);
+            int bid = cmd->data.storage_all_states.building_id;
+            building *b = building_get(bid);
+            if (reject != MP_CMD_REJECT_NONE) {
+                return reject;
+            }
+            if (!b || b->state != BUILDING_STATE_IN_USE) {
+                return MP_CMD_REJECT_CITY_NOT_FOUND;
+            }
+            if (b->type != BUILDING_WAREHOUSE && b->type != BUILDING_GRANARY) {
+                return MP_CMD_REJECT_INVALID;
+            }
+            if (cmd->data.storage_all_states.new_state != BUILDING_STORAGE_STATE_ACCEPTING &&
+                cmd->data.storage_all_states.new_state != BUILDING_STORAGE_STATE_NOT_ACCEPTING) {
+                return MP_CMD_REJECT_INVALID;
+            }
             return MP_CMD_REJECT_NONE;
         }
 
         case MP_CMD_REQUEST_PAUSE:
         case MP_CMD_REQUEST_RESUME:
         case MP_CMD_REQUEST_SPEED:
+            return validate_session_control_command(cmd);
         case MP_CMD_SET_READY:
         case MP_CMD_CHAT_MESSAGE:
             return MP_CMD_REJECT_NONE;
@@ -898,14 +1009,29 @@ static void apply_command(mp_command *cmd)
         }
 
         case MP_CMD_REQUEST_PAUSE:
+            if (mp_dedicated_server_is_enabled()) {
+                cmd->status = MP_CMD_STATUS_REJECTED;
+                cmd->reject_reason = MP_CMD_REJECT_FORBIDDEN;
+                return;
+            }
             net_session_set_paused(1);
             break;
 
         case MP_CMD_REQUEST_RESUME:
+            if (mp_dedicated_server_is_enabled()) {
+                cmd->status = MP_CMD_STATUS_REJECTED;
+                cmd->reject_reason = MP_CMD_REJECT_FORBIDDEN;
+                return;
+            }
             net_session_set_paused(0);
             break;
 
         case MP_CMD_REQUEST_SPEED:
+            if (mp_dedicated_server_is_enabled()) {
+                cmd->status = MP_CMD_STATUS_REJECTED;
+                cmd->reject_reason = MP_CMD_REJECT_FORBIDDEN;
+                return;
+            }
             net_session_set_game_speed(cmd->data.speed.speed);
             break;
 
@@ -931,7 +1057,13 @@ static void apply_command(mp_command *cmd)
 
         case MP_CMD_SET_STORAGE_STATE: {
             const mp_cmd_set_storage_state *data = &cmd->data.storage_state;
+            int reject = validate_storage_scope(cmd, data->city_id, data->building_id);
             building *b = building_get(data->building_id);
+            if (reject != MP_CMD_REJECT_NONE) {
+                cmd->status = MP_CMD_STATUS_REJECTED;
+                cmd->reject_reason = (uint8_t)reject;
+                return;
+            }
             if (b && b->storage_id) {
                 const building_storage *current = building_storage_get(b->storage_id);
                 if (current) {
@@ -958,11 +1090,16 @@ static void apply_command(mp_command *cmd)
         case MP_CMD_SET_STORAGE_PERMISSION: {
             const mp_cmd_set_storage_permission *data = &cmd->data.storage_permission;
             building *b = building_get(data->building_id);
-            int enabled = 0;
+            int reject = validate_storage_scope(cmd, data->city_id, data->building_id);
+            int enabled = data->enabled ? 1 : 0;
+            if (reject != MP_CMD_REJECT_NONE) {
+                cmd->status = MP_CMD_STATUS_REJECTED;
+                cmd->reject_reason = (uint8_t)reject;
+                return;
+            }
             if (b) {
-                building_storage_toggle_permission(data->permission, b);
-                enabled = building_storage_get_permission(
-                    (building_storage_permission_states)data->permission, b);
+                building_storage_set_permission_allowed(
+                    (building_storage_permission_states)data->permission, b, enabled);
             }
             /* Broadcast to all clients */
             uint8_t event_buf[40];
@@ -976,6 +1113,105 @@ static void apply_command(mp_command *cmd)
             net_write_u8(&es, (uint8_t)enabled);
             net_session_broadcast(NET_MSG_HOST_EVENT, event_buf,
                                   (uint32_t)net_serializer_position(&es));
+            break;
+        }
+
+        case MP_CMD_SET_STORAGE_QUANTITY: {
+            const mp_cmd_set_storage_quantity *data = &cmd->data.storage_quantity;
+            building *b = building_get(data->building_id);
+            int reject = validate_storage_scope(cmd, data->city_id, data->building_id);
+            if (reject != MP_CMD_REJECT_NONE) {
+                cmd->status = MP_CMD_STATUS_REJECTED;
+                cmd->reject_reason = (uint8_t)reject;
+                return;
+            }
+            if (b && b->storage_id) {
+                building_storage_set_quantity(b->storage_id, data->resource, data->quantity);
+            }
+
+            {
+                uint8_t event_buf[40];
+                net_serializer es;
+                net_serializer_init(&es, event_buf, sizeof(event_buf));
+                net_write_u16(&es, NET_EVENT_STORAGE_QUANTITY_CHANGED);
+                net_write_u32(&es, tick);
+                net_write_u8(&es, cmd->player_id);
+                net_write_i32(&es, data->building_id);
+                net_write_i32(&es, data->resource);
+                net_write_i32(&es, data->quantity);
+                net_session_broadcast(NET_MSG_HOST_EVENT, event_buf,
+                                      (uint32_t)net_serializer_position(&es));
+            }
+            break;
+        }
+
+        case MP_CMD_SET_STORAGE_EMPTY_ALL: {
+            const mp_cmd_set_storage_empty_all *data = &cmd->data.storage_empty_all;
+            building *b = building_get(data->building_id);
+            int reject = validate_storage_scope(cmd, data->city_id, data->building_id);
+            int enabled = data->enabled ? 1 : 0;
+            if (reject != MP_CMD_REJECT_NONE) {
+                cmd->status = MP_CMD_STATUS_REJECTED;
+                cmd->reject_reason = (uint8_t)reject;
+                return;
+            }
+            if (b && b->storage_id) {
+                building_storage_set_empty_all(b->storage_id, enabled);
+            }
+
+            {
+                uint8_t event_buf[32];
+                net_serializer es;
+                net_serializer_init(&es, event_buf, sizeof(event_buf));
+                net_write_u16(&es, NET_EVENT_STORAGE_EMPTY_ALL_CHANGED);
+                net_write_u32(&es, tick);
+                net_write_u8(&es, cmd->player_id);
+                net_write_i32(&es, data->building_id);
+                net_write_u8(&es, (uint8_t)enabled);
+                net_session_broadcast(NET_MSG_HOST_EVENT, event_buf,
+                                      (uint32_t)net_serializer_position(&es));
+            }
+            break;
+        }
+
+        case MP_CMD_SET_STORAGE_ALL_STATES: {
+            const mp_cmd_set_storage_all_states *data = &cmd->data.storage_all_states;
+            building *b = building_get(data->building_id);
+            int reject = validate_storage_scope(cmd, data->city_id, data->building_id);
+            if (reject != MP_CMD_REJECT_NONE) {
+                cmd->status = MP_CMD_STATUS_REJECTED;
+                cmd->reject_reason = (uint8_t)reject;
+                return;
+            }
+            if (b && b->storage_id) {
+                const resource_list *list = b->type == BUILDING_GRANARY
+                    ? city_resource_get_potential_foods()
+                    : city_resource_get_potential();
+                const building_storage *current = building_storage_get(b->storage_id);
+                if (list && current) {
+                    building_storage updated = *current;
+                    for (int i = 0; i < list->size; i++) {
+                        int resource = list->items[i];
+                        if (resource >= RESOURCE_MIN && resource < RESOURCE_MAX) {
+                            updated.resource_state[resource].state = data->new_state;
+                        }
+                    }
+                    building_storage_set_data(b->storage_id, updated);
+                }
+            }
+
+            {
+                uint8_t event_buf[32];
+                net_serializer es;
+                net_serializer_init(&es, event_buf, sizeof(event_buf));
+                net_write_u16(&es, NET_EVENT_STORAGE_ALL_STATES_CHANGED);
+                net_write_u32(&es, tick);
+                net_write_u8(&es, cmd->player_id);
+                net_write_i32(&es, data->building_id);
+                net_write_u8(&es, data->new_state);
+                net_session_broadcast(NET_MSG_HOST_EVENT, event_buf,
+                                      (uint32_t)net_serializer_position(&es));
+            }
             break;
         }
 
@@ -1222,6 +1458,7 @@ const char *mp_command_bus_reject_reason_text(uint8_t reason)
         case MP_CMD_REJECT_SEQUENCE_INVALID: return "Sequencia invalida";
         case MP_CMD_REJECT_RATE_LIMITED: return "Limite de acoes excedido";
         case MP_CMD_REJECT_SESSION_BUSY: return "Sessao ocupada";
+        case MP_CMD_REJECT_FORBIDDEN: return "Acao proibida neste servidor";
         case MP_CMD_REJECT_RESOURCE_INVALID: return "Recurso invalido";
         case MP_CMD_REJECT_INVALID:
         default:

@@ -764,8 +764,64 @@ void multiplayer_empire_sync_receive_event(const uint8_t *data, uint32_t size)
             if (!net_serializer_has_overflow(&s)) {
                 building *b = building_get(building_id);
                 if (b) {
-                    building_storage_set_permission(
+                    building_storage_set_permission_allowed(
                         (building_storage_permission_states)permission, b, enabled ? 1 : 0);
+                }
+            }
+            (void)player_id;
+            break;
+        }
+
+        case NET_EVENT_STORAGE_QUANTITY_CHANGED: {
+            uint8_t player_id = net_read_u8(&s);
+            int building_id = net_read_i32(&s);
+            int resource = net_read_i32(&s);
+            int quantity = net_read_i32(&s);
+            if (!net_serializer_has_overflow(&s)) {
+                building *b = building_get(building_id);
+                if (b && b->storage_id && resource >= RESOURCE_MIN && resource < RESOURCE_MAX) {
+                    building_storage_set_quantity(b->storage_id, resource, quantity);
+                }
+            }
+            (void)player_id;
+            break;
+        }
+
+        case NET_EVENT_STORAGE_EMPTY_ALL_CHANGED: {
+            uint8_t player_id = net_read_u8(&s);
+            int building_id = net_read_i32(&s);
+            uint8_t enabled = net_read_u8(&s);
+            if (!net_serializer_has_overflow(&s)) {
+                building *b = building_get(building_id);
+                if (b && b->storage_id) {
+                    building_storage_set_empty_all(b->storage_id, enabled ? 1 : 0);
+                }
+            }
+            (void)player_id;
+            break;
+        }
+
+        case NET_EVENT_STORAGE_ALL_STATES_CHANGED: {
+            uint8_t player_id = net_read_u8(&s);
+            int building_id = net_read_i32(&s);
+            uint8_t new_state = net_read_u8(&s);
+            if (!net_serializer_has_overflow(&s)) {
+                building *b = building_get(building_id);
+                if (b && b->storage_id) {
+                    const resource_list *list = b->type == BUILDING_GRANARY
+                        ? city_resource_get_potential_foods()
+                        : city_resource_get_potential();
+                    const building_storage *current = building_storage_get(b->storage_id);
+                    if (list && current) {
+                        building_storage updated = *current;
+                        for (int i = 0; i < list->size; i++) {
+                            int resource = list->items[i];
+                            if (resource >= RESOURCE_MIN && resource < RESOURCE_MAX) {
+                                updated.resource_state[resource].state = new_state;
+                            }
+                        }
+                        building_storage_set_data(b->storage_id, updated);
+                    }
                 }
             }
             (void)player_id;

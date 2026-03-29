@@ -42,6 +42,8 @@
 #ifdef ENABLE_MULTIPLAYER
 #include "multiplayer/command_types.h"
 #include "multiplayer/command_bus.h"
+#include "multiplayer/ownership.h"
+#include "multiplayer/player_registry.h"
 #include "network/session.h"
 #endif
 
@@ -245,6 +247,119 @@ static struct {
     resource_list stored_resources;
 } data;
 
+#ifdef ENABLE_MULTIPLAYER
+static int local_storage_city_id(void)
+{
+    int city_id = mp_ownership_find_local_city();
+    if (city_id >= 0) {
+        return city_id;
+    }
+
+    mp_player *local = mp_player_registry_get_local();
+    if (local) {
+        if (local->assigned_city_id >= 0) {
+            return local->assigned_city_id;
+        }
+        if (local->empire_city_id >= 0) {
+            return local->empire_city_id;
+        }
+    }
+
+    return -1;
+}
+
+static int submit_storage_permission_command(int building_id,
+    building_storage_permission_states permission, int enabled)
+{
+    mp_command cmd = {0};
+    int city_id = local_storage_city_id();
+
+    if (!net_session_is_active() || city_id < 0) {
+        return 0;
+    }
+
+    cmd.command_type = MP_CMD_SET_STORAGE_PERMISSION;
+    cmd.player_id = net_session_get_local_player_id();
+    cmd.data.storage_permission.city_id = city_id;
+    cmd.data.storage_permission.building_id = building_id;
+    cmd.data.storage_permission.permission = (uint8_t)permission;
+    cmd.data.storage_permission.enabled = enabled ? 1 : 0;
+    return mp_command_bus_submit(&cmd);
+}
+
+static int submit_storage_state_command(int building_id, int resource,
+    building_storage_state new_state)
+{
+    mp_command cmd = {0};
+    int city_id = local_storage_city_id();
+
+    if (!net_session_is_active() || city_id < 0) {
+        return 0;
+    }
+
+    cmd.command_type = MP_CMD_SET_STORAGE_STATE;
+    cmd.player_id = net_session_get_local_player_id();
+    cmd.data.storage_state.city_id = city_id;
+    cmd.data.storage_state.building_id = building_id;
+    cmd.data.storage_state.resource = resource;
+    cmd.data.storage_state.new_state = (uint8_t)new_state;
+    return mp_command_bus_submit(&cmd);
+}
+
+static int submit_storage_quantity_command(int building_id, int resource, int quantity)
+{
+    mp_command cmd = {0};
+    int city_id = local_storage_city_id();
+
+    if (!net_session_is_active() || city_id < 0) {
+        return 0;
+    }
+
+    cmd.command_type = MP_CMD_SET_STORAGE_QUANTITY;
+    cmd.player_id = net_session_get_local_player_id();
+    cmd.data.storage_quantity.city_id = city_id;
+    cmd.data.storage_quantity.building_id = building_id;
+    cmd.data.storage_quantity.resource = resource;
+    cmd.data.storage_quantity.quantity = quantity;
+    return mp_command_bus_submit(&cmd);
+}
+
+static int submit_storage_empty_all_command(int building_id, int enabled)
+{
+    mp_command cmd = {0};
+    int city_id = local_storage_city_id();
+
+    if (!net_session_is_active() || city_id < 0) {
+        return 0;
+    }
+
+    cmd.command_type = MP_CMD_SET_STORAGE_EMPTY_ALL;
+    cmd.player_id = net_session_get_local_player_id();
+    cmd.data.storage_empty_all.city_id = city_id;
+    cmd.data.storage_empty_all.building_id = building_id;
+    cmd.data.storage_empty_all.enabled = enabled ? 1 : 0;
+    return mp_command_bus_submit(&cmd);
+}
+
+static int submit_storage_all_states_command(int building_id,
+    building_storage_state new_state)
+{
+    mp_command cmd = {0};
+    int city_id = local_storage_city_id();
+
+    if (!net_session_is_active() || city_id < 0) {
+        return 0;
+    }
+
+    cmd.command_type = MP_CMD_SET_STORAGE_ALL_STATES;
+    cmd.player_id = net_session_get_local_player_id();
+    cmd.data.storage_all_states.city_id = city_id;
+    cmd.data.storage_all_states.building_id = building_id;
+    cmd.data.storage_all_states.new_state = (uint8_t)new_state;
+    return mp_command_bus_submit(&cmd);
+}
+#endif
+
 uint8_t quantity_full_button_text[] = "32";
 
 typedef enum {
@@ -325,7 +440,7 @@ static void toggle_permissions_all(int param1, int param2)
 {
     int *building_permissions;
     int number_of_permissions;
-    int accept_all = param1;
+    int enabled = param1 == 0;
     building *b = building_get(data.building_id);
     int type = b->type;
     if (type == BUILDING_WAREHOUSE) {
@@ -336,9 +451,24 @@ static void toggle_permissions_all(int param1, int param2)
         number_of_permissions = sizeof(granary_permissions_buttons) / sizeof(granary_permissions_buttons[0]);
     }
 
+#ifdef ENABLE_MULTIPLAYER
+    if (net_session_is_active()) {
+        for (int i = 0; i < number_of_permissions; i++) {
+            submit_storage_permission_command(
+                data.building_id,
+                (building_storage_permission_states)building_permissions[i],
+                enabled);
+        }
+        window_invalidate();
+        return;
+    }
+#endif
+
     for (int i = 0; i < number_of_permissions; i++) { //do it via loop instead of bit check due to unused permissions
         int permission = building_permissions[i];
-        building_storage_set_permission(permission, building_get(data.building_id), accept_all);
+        building_storage_set_permission_allowed(
+            (building_storage_permission_states)permission,
+            building_get(data.building_id), enabled);
     }
     window_invalidate();
 }
@@ -1471,19 +1601,16 @@ static void toggle_resource_state(const generic_button *button, int reverse_orde
         } else {
             resource = city_resource_get_potential_foods()->items[index];
         }
-        building_storage_cycle_resource_state(b->storage_id, resource, reverse_order);
 #ifdef ENABLE_MULTIPLAYER
         if (net_session_is_active()) {
-            building_storage_state new_state = building_storage_get_state(b, resource, 0);
-            mp_command cmd = {0};
-            cmd.command_type = MP_CMD_SET_STORAGE_STATE;
-            cmd.player_id = net_session_get_local_player_id();
-            cmd.data.storage_state.building_id = b->id;
-            cmd.data.storage_state.resource = resource;
-            cmd.data.storage_state.new_state = (uint8_t)new_state;
-            mp_command_bus_submit(&cmd);
-        }
+            building_storage_state new_state = building_storage_get_next_state(
+                b, resource, reverse_order);
+            submit_storage_state_command(b->id, resource, new_state);
+        } else
 #endif
+        {
+            building_storage_cycle_resource_state(b->storage_id, resource, reverse_order);
+        }
     }
     window_invalidate();
 }
@@ -1506,34 +1633,34 @@ static void storage_toggle_permissions(const generic_button *button)
 {
     int index = button->parameter1;
     building *b = building_get(data.building_id);
-    building_storage_toggle_permission(index, b);
 #ifdef ENABLE_MULTIPLAYER
     if (net_session_is_active()) {
-        mp_command cmd = {0};
-        cmd.command_type = MP_CMD_SET_STORAGE_PERMISSION;
-        cmd.player_id = net_session_get_local_player_id();
-        cmd.data.storage_permission.building_id = b->id;
-        cmd.data.storage_permission.permission = (uint8_t)index;
-        mp_command_bus_submit(&cmd);
-    }
+        int enabled = !building_storage_is_permission_allowed(
+            (building_storage_permission_states)index, b);
+        submit_storage_permission_command(
+            b->id, (building_storage_permission_states)index, enabled);
+    } else
 #endif
+    {
+        building_storage_toggle_permission(index, b);
+    }
     window_invalidate();
 }
 
 static void toggle_mantain(int param1, int param2)
 {
     building *b = building_get(data.building_id);
-    building_storage_toggle_permission(BUILDING_STORAGE_PERMISSION_WORKER, b);
 #ifdef ENABLE_MULTIPLAYER
     if (net_session_is_active()) {
-        mp_command cmd = {0};
-        cmd.command_type = MP_CMD_SET_STORAGE_PERMISSION;
-        cmd.player_id = net_session_get_local_player_id();
-        cmd.data.storage_permission.building_id = b->id;
-        cmd.data.storage_permission.permission = BUILDING_STORAGE_PERMISSION_WORKER;
-        mp_command_bus_submit(&cmd);
-    }
+        int enabled = !building_storage_is_permission_allowed(
+            BUILDING_STORAGE_PERMISSION_WORKER, b);
+        submit_storage_permission_command(
+            b->id, BUILDING_STORAGE_PERMISSION_WORKER, enabled);
+    } else
 #endif
+    {
+        building_storage_toggle_permission(BUILDING_STORAGE_PERMISSION_WORKER, b);
+    }
     window_invalidate();
 }
 
@@ -1542,11 +1669,22 @@ static void toggle_partial_resource_state(const generic_button *button, int reve
     int index = button->parameter1;
     building *b = building_get(data.building_id);
     int resource;
+    int quantity;
     if (b->type == BUILDING_WAREHOUSE) {
         resource = city_resource_get_potential()->items[index + scrollbar.scroll_position - 1];
     } else {
         resource = city_resource_get_potential_foods()->items[index + scrollbar.scroll_position - 1];
     }
+#ifdef ENABLE_MULTIPLAYER
+    if (net_session_is_active()) {
+        if (building_storage_get_state(b, resource, 0) != BUILDING_STORAGE_STATE_NOT_ACCEPTING) {
+            quantity = building_storage_get_next_quantity(b, resource, reverse_order);
+            submit_storage_quantity_command(b->id, resource, quantity);
+        }
+        window_invalidate();
+        return;
+    }
+#endif
     building_storage_cycle_partial_resource_state(b->storage_id, resource, reverse_order);
     window_invalidate();
 }
@@ -1580,15 +1718,33 @@ static void dock_toggle_route(const generic_button *button)
 
 static void storage_empty_all(const generic_button *button)
 {
-    int storage_id = building_get(data.building_id)->storage_id;
+    building *b = building_get(data.building_id);
+    int storage_id = b->storage_id;
+#ifdef ENABLE_MULTIPLAYER
+    if (net_session_is_active()) {
+        submit_storage_empty_all_command(
+            data.building_id, !building_storage_get_empty_all(data.building_id));
+        window_invalidate();
+        return;
+    }
+#endif
     building_storage_toggle_empty_all(storage_id);
     window_invalidate();
 }
 
 static void storage_toggle_all_states(int param1, int param2)
 {
-
     int storage_id = building_get(data.building_id)->storage_id;
+#ifdef ENABLE_MULTIPLAYER
+    if (net_session_is_active()) {
+        building_storage_state new_state = param1 == 0
+            ? BUILDING_STORAGE_STATE_ACCEPTING
+            : BUILDING_STORAGE_STATE_NOT_ACCEPTING;
+        submit_storage_all_states_command(data.building_id, new_state);
+        window_invalidate();
+        return;
+    }
+#endif
     if (param1 == 0) {
         building_storage_accept_all(storage_id);
     } else {

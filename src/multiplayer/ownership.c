@@ -5,6 +5,8 @@
 #include "player_registry.h"
 #include "network/serialize.h"
 #include "network/session.h"
+#include "building/building.h"
+#include "building/storage.h"
 #include "empire/city.h"
 #include "core/log.h"
 
@@ -160,6 +162,19 @@ int mp_ownership_is_city_player_owned(int city_id)
            entry->owner_type == MP_OWNER_REMOTE_PLAYER;
 }
 
+int mp_ownership_player_owns_city(uint8_t player_id, int city_id)
+{
+    city_ownership *entry = find_city_entry(city_id);
+    if (!entry) {
+        return 0;
+    }
+    if (entry->owner_type != MP_OWNER_LOCAL_PLAYER &&
+        entry->owner_type != MP_OWNER_REMOTE_PLAYER) {
+        return 0;
+    }
+    return entry->player_id == player_id;
+}
+
 int mp_ownership_is_city_online(int city_id)
 {
     city_ownership *entry = find_city_entry(city_id);
@@ -175,6 +190,43 @@ void mp_ownership_set_city_online(int city_id, int online)
     if (entry) {
         entry->is_online = online;
     }
+}
+
+int mp_ownership_resolve_storage_scope(uint8_t player_id, int requested_city_id,
+    int building_id, int *out_city_id)
+{
+    mp_player *player = mp_player_registry_get(player_id);
+    building *b = building_get(building_id);
+
+    if (!player || !player->active) {
+        log_error("Storage scope rejected: inactive player", 0, player_id);
+        return 0;
+    }
+    if (requested_city_id < 0) {
+        log_error("Storage scope rejected: invalid city", 0, requested_city_id);
+        return 0;
+    }
+    if (!b || b->state != BUILDING_STATE_IN_USE) {
+        log_error("Storage scope rejected: invalid building", 0, building_id);
+        return 0;
+    }
+    if (!b->storage_id || building_storage_get_building_id(b->storage_id) != building_id) {
+        log_error("Storage scope rejected: storage binding mismatch", 0, building_id);
+        return 0;
+    }
+    if (!mp_ownership_player_owns_city(player_id, requested_city_id)) {
+        log_error("Storage scope rejected: city not owned by player", 0, requested_city_id);
+        return 0;
+    }
+    if (player->assigned_city_id >= 0 && player->assigned_city_id != requested_city_id) {
+        log_error("Storage scope rejected: city scope mismatch", 0, requested_city_id);
+        return 0;
+    }
+
+    if (out_city_id) {
+        *out_city_id = requested_city_id;
+    }
+    return 1;
 }
 
 /* ---- Route Ownership ---- */

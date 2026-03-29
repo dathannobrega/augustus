@@ -37,11 +37,15 @@
  *
  * v7 additions:
  *   - Player registry persists last accepted command sequence for anti-replay resume
+ *
+ * v8 additions:
+ *   - Dedicated SERVER_RULES domain persisted explicitly
+ *   - Domain table is the authoritative source for tagged domain loading
  */
 
 #define MP_SAVE_MAGIC       0x4D504C59  /* "MPLY" */
-#define MP_SAVE_VERSION     7
-#define MP_SAVE_DOMAIN_COUNT 8
+#define MP_SAVE_VERSION     8
+#define MP_SAVE_DOMAIN_COUNT 9
 
 #define MP_SAVE_MAX_FILE_SIZE       (512 * 1024)
 #define MP_SAVE_MAX_DOMAIN_SIZE     (128 * 1024)
@@ -60,6 +64,7 @@
 #define MP_DOMAIN_TAG_TRADE_SYNC_TRADERS 0x06
 #define MP_DOMAIN_TAG_P2P_ROUTES         0x07
 #define MP_DOMAIN_TAG_TIME_SYNC          0x08
+#define MP_DOMAIN_TAG_SERVER_RULES       0x09
 
 /* Load error codes */
 #define MP_LOAD_OK                  0
@@ -95,6 +100,7 @@ typedef struct {
     uint32_t trade_sync_traders_size;
     uint32_t p2p_routes_size;
     uint32_t time_sync_size;
+    uint32_t server_rules_size;
     uint32_t next_command_sequence_id;
     /* v4 fields */
     uint32_t total_payload_size;    /* Total size of all domain data after header */

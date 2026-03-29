@@ -47,7 +47,10 @@ typedef enum {
 
     /* Building storage settings (warehouse/granary) */
     MP_CMD_SET_STORAGE_STATE,      /* Change accept/reject/get state for a resource in a building */
-    MP_CMD_SET_STORAGE_PERMISSION, /* Toggle dock/worker/etc permission for a building */
+    MP_CMD_SET_STORAGE_PERMISSION, /* Set dock/worker/etc permission for a building */
+    MP_CMD_SET_STORAGE_QUANTITY,   /* Set partial quantity threshold for a resource */
+    MP_CMD_SET_STORAGE_EMPTY_ALL,  /* Set empty-all mode for a storage building */
+    MP_CMD_SET_STORAGE_ALL_STATES, /* Set all visible resources to the same state */
 
     /* Chat */
     MP_CMD_CHAT_MESSAGE,
@@ -85,7 +88,8 @@ typedef enum {
     MP_CMD_REJECT_PLAYER_DISCONNECTED,
     MP_CMD_REJECT_SEQUENCE_INVALID,
     MP_CMD_REJECT_RATE_LIMITED,
-    MP_CMD_REJECT_SESSION_BUSY
+    MP_CMD_REJECT_SESSION_BUSY,
+    MP_CMD_REJECT_FORBIDDEN
 } mp_command_reject_reason;
 
 typedef enum {
@@ -181,6 +185,7 @@ typedef struct {
  *         ACCEPTING_HALF=3, ACCEPTING_QUARTER=4, ACCEPTING_3QUARTERS=5
  */
 typedef struct {
+    int city_id;
     int building_id;
     int resource;
     uint8_t new_state;       /* Building storage state enum value */
@@ -190,9 +195,30 @@ typedef struct {
  * Toggle a permission (dock access, worker) for a warehouse/granary.
  */
 typedef struct {
+    int city_id;
     int building_id;
     uint8_t permission;      /* building_storage_permission_states enum */
+    uint8_t enabled;         /* 1 = allow permission, 0 = block */
 } mp_cmd_set_storage_permission;
+
+typedef struct {
+    int city_id;
+    int building_id;
+    int resource;
+    int quantity;
+} mp_cmd_set_storage_quantity;
+
+typedef struct {
+    int city_id;
+    int building_id;
+    uint8_t enabled;
+} mp_cmd_set_storage_empty_all;
+
+typedef struct {
+    int city_id;
+    int building_id;
+    uint8_t new_state;
+} mp_cmd_set_storage_all_states;
 
 typedef struct {
     char message[128];
@@ -221,6 +247,9 @@ typedef struct {
         mp_cmd_set_resource_setting resource_setting;
         mp_cmd_set_storage_state storage_state;
         mp_cmd_set_storage_permission storage_permission;
+        mp_cmd_set_storage_quantity storage_quantity;
+        mp_cmd_set_storage_empty_all storage_empty_all;
+        mp_cmd_set_storage_all_states storage_all_states;
         mp_cmd_request_speed speed;
         mp_cmd_chat_message chat;
     } data;

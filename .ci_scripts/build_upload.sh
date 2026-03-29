@@ -25,11 +25,22 @@ DEPLOY_FILE=
 case "$DEPLOY" in
 "linux")
   PACKAGE=linux
-  DEPLOY_FILE=claudius-$VERSION-linux-x86_64
+  DEPLOY_FILE=claudius-$VERSION-linux-x86_64.tar.gz
   cp "${build_dir}/claudius" "deploy/claudius"
   cp -r "${build_dir}/assets" "deploy/assets"
   cp -r "${build_dir}/maps" "deploy/maps"
   cp -r "${build_dir}/manual" "deploy/manual"
+  tar -czf "deploy/$DEPLOY_FILE" -C deploy claudius assets maps manual
+  ;;
+"linux-server")
+  PACKAGE=linux-server
+  DEPLOY_FILE=claudius-server-$VERSION-linux-x86_64.tar.gz
+  cp "${build_dir}/claudius-server" "deploy/claudius-server"
+  cp "claudius-server.ini" "deploy/claudius-server.ini"
+  cp -r "${build_dir}/assets" "deploy/assets"
+  cp -r "${build_dir}/maps" "deploy/maps"
+  cp -r "${build_dir}/manual" "deploy/manual"
+  tar -czf "deploy/$DEPLOY_FILE" -C deploy claudius-server claudius-server.ini assets maps manual
   ;;
 "flatpak")
   PACKAGE=linux-flatpak

@@ -340,7 +340,12 @@ int net_udp_send_broadcast(int socket_fd, uint16_t port,
 
 void net_udp_addr_set(net_udp_addr *addr, const char *host, uint16_t port)
 {
-    addr->addr = inet_addr(host);
+    struct in_addr parsed_addr;
+    if (inet_pton(AF_INET, host, &parsed_addr) == 1) {
+        addr->addr = parsed_addr.s_addr;
+    } else {
+        addr->addr = INADDR_NONE;
+    }
     addr->port = htons(port);
 }
 

@@ -48,8 +48,11 @@ uint8_t mp_ownership_get_city_player_id(int city_id);
 int mp_ownership_is_city_local(int city_id);
 int mp_ownership_is_city_remote_player(int city_id);
 int mp_ownership_is_city_player_owned(int city_id);
+int mp_ownership_player_owns_city(uint8_t player_id, int city_id);
 int mp_ownership_is_city_online(int city_id);
 void mp_ownership_set_city_online(int city_id, int online);
+int mp_ownership_resolve_storage_scope(uint8_t player_id, int requested_city_id,
+    int building_id, int *out_city_id);
 
 /* ---- Route ownership with full lifecycle ---- */
 

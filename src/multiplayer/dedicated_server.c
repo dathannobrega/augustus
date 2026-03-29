@@ -58,6 +58,10 @@ void mp_dedicated_server_reset_options(void)
     options.reconnect_timeout_ticks = 5000;
     options.command_rate_limit_per_sec = 30;
     options.queue_limit_per_peer = 16;
+    options.handshake_attempts_per_window = 8;
+    options.handshake_window_ms = 10000;
+    options.handshake_cooldown_ms = 10000;
+    options.pending_connections_per_ip = 2;
     strncpy(options.server_name, "Claudius Dedicated", sizeof(options.server_name) - 1);
     strncpy(options.listen_address, "0.0.0.0", sizeof(options.listen_address) - 1);
 }
@@ -89,6 +93,18 @@ void mp_dedicated_server_set_options(const mp_dedicated_server_options *new_opti
     }
     if (options.autosave_interval_sec <= 0) {
         options.autosave_interval_sec = MP_AUTOSAVE_DEFAULT_INTERVAL;
+    }
+    if (options.handshake_attempts_per_window == 0) {
+        options.handshake_attempts_per_window = 8;
+    }
+    if (options.handshake_window_ms == 0) {
+        options.handshake_window_ms = 10000;
+    }
+    if (options.handshake_cooldown_ms == 0) {
+        options.handshake_cooldown_ms = 10000;
+    }
+    if (options.pending_connections_per_ip == 0) {
+        options.pending_connections_per_ip = 2;
     }
 }
 

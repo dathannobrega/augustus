@@ -30,6 +30,10 @@ typedef struct {
     uint32_t reconnect_timeout_ticks;
     uint32_t command_rate_limit_per_sec;
     uint32_t queue_limit_per_peer;
+    uint32_t handshake_attempts_per_window;
+    uint32_t handshake_window_ms;
+    uint32_t handshake_cooldown_ms;
+    uint32_t pending_connections_per_ip;
 } mp_dedicated_server_options;
 
 void mp_dedicated_server_reset_options(void);

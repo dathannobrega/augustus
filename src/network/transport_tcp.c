@@ -100,20 +100,11 @@ int net_tcp_listen_on(const char *bind_address, uint16_t port)
     if (bind_address && bind_address[0] &&
         strcmp(bind_address, "0.0.0.0") != 0 &&
         strcmp(bind_address, "*") != 0) {
-#ifdef _WIN32
-        addr.sin_addr.s_addr = inet_addr(bind_address);
-        if (addr.sin_addr.s_addr == INADDR_NONE) {
-            MP_LOG_ERROR("NET", "Invalid TCP bind address '%s'", bind_address);
-            NET_CLOSE_SOCKET(fd);
-            return -1;
-        }
-#else
         if (inet_pton(AF_INET, bind_address, &addr.sin_addr) != 1) {
             MP_LOG_ERROR("NET", "Invalid TCP bind address '%s'", bind_address);
             NET_CLOSE_SOCKET(fd);
             return -1;
         }
-#endif
     }
     addr.sin_port = htons(port);
 

@@ -37,6 +37,12 @@ jobs:
             DEPLOY: linux
             artifact: linux-x64
             os: ubuntu-24.04
+          - name: Linux Dedicated Server
+            BUILD_TARGET: linux
+            DEPLOY: linux-server
+            BUILD_DEDICATED_SERVER: ON
+            artifact: linux-dedicated-server
+            os: ubuntu-24.04
           - name: Linux Flatpak
             BUILD_TARGET: flatpak
             DEPLOY: flatpak
@@ -52,6 +58,7 @@ jobs:
     env:
       BUILD_TARGET: ${{ matrix.BUILD_TARGET }}
       DEPLOY: ${{ matrix.DEPLOY }}
+      BUILD_DEDICATED_SERVER: ${{ matrix.BUILD_DEDICATED_SERVER }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
