@@ -11,6 +11,7 @@
 #include "core/calc.h"
 #include "core/image.h"
 #include "core/image_group_editor.h"
+#include "game/game.h"
 #include "map/building.h"
 #include "map/building_tiles.h"
 #include "map/data.h"
@@ -88,6 +89,9 @@ static void determine_meeting_center(void)
 }
 
 static int native_hut_alt_get_image_id(void) {
+    if (game_is_headless_server()) {
+        return scenario.native_images.alt_hut;
+    }
     switch (scenario_property_climate()) {
         case CLIMATE_NORTHERN:
             return assets_get_image_id("Terrain_Maps", "Native_Hut_Northern_01");
@@ -100,6 +104,7 @@ static int native_hut_alt_get_image_id(void) {
 
 void map_natives_init(void)
 {
+    int is_headless = game_is_headless_server();
     int image_hut = scenario.native_images.hut;
     int image_meeting = scenario.native_images.meeting;
     int image_crops = scenario.native_images.crops;
@@ -107,7 +112,7 @@ void map_natives_init(void)
     int scenario_image_decoration = scenario.native_images.decoration;
     int scenario_image_monument = scenario.native_images.monument;
     int scenario_image_watchtower = scenario.native_images.watchtower;
-    int native_image = image_group(GROUP_BUILDING_NATIVE);
+    int native_image = is_headless ? image_hut : image_group(GROUP_BUILDING_NATIVE);
     int native_hut_alt_image = native_hut_alt_get_image_id();
     int grid_offset = map_data.start_offset;
     for (int y = 0; y < map_data.height; y++, grid_offset += map_data.border_size) {
@@ -121,34 +126,52 @@ void map_natives_init(void)
             int image_id = map_image_at(grid_offset);
             if (image_id == image_hut) {
                 type = BUILDING_NATIVE_HUT;
-                map_image_set(grid_offset, native_image);
+                if (!is_headless) {
+                    map_image_set(grid_offset, native_image);
+                }
             } else if (image_id == image_hut + 1) {
                 type = BUILDING_NATIVE_HUT;
-                map_image_set(grid_offset, native_image + 1);
+                if (!is_headless) {
+                    map_image_set(grid_offset, native_image + 1);
+                }
             } else if (scenario_image_alt_hut != 0 && image_id == scenario_image_alt_hut) {
                 type = BUILDING_NATIVE_HUT_ALT;
-                map_image_set(grid_offset, native_hut_alt_image);
+                if (!is_headless) {
+                    map_image_set(grid_offset, native_hut_alt_image);
+                }
             } else if (scenario_image_alt_hut != 0 && image_id == scenario_image_alt_hut + 1) {
                 type = BUILDING_NATIVE_HUT_ALT;
-                map_image_set(grid_offset, native_hut_alt_image + 1);
+                if (!is_headless) {
+                    map_image_set(grid_offset, native_hut_alt_image + 1);
+                }
             } else if (scenario_image_decoration != 0 && image_id == scenario_image_decoration) {
                 type = BUILDING_NATIVE_DECORATION;
-                map_image_set(grid_offset, building_image_get_for_type(type));
+                if (!is_headless) {
+                    map_image_set(grid_offset, building_image_get_for_type(type));
+                }
             } else if (scenario_image_monument != 0 && image_id == scenario_image_monument) {
                 type = BUILDING_NATIVE_MONUMENT;
-                map_image_set(grid_offset, building_image_get_for_type(type));
+                if (!is_headless) {
+                    map_image_set(grid_offset, building_image_get_for_type(type));
+                }
             } else if (scenario_image_watchtower != 0 && image_id == scenario_image_watchtower) {
                 type = BUILDING_NATIVE_WATCHTOWER;
-                map_image_set(grid_offset, building_image_get_for_type(type));
+                if (!is_headless) {
+                    map_image_set(grid_offset, building_image_get_for_type(type));
+                }
             } else if (image_id == image_meeting) {
                 type = BUILDING_NATIVE_MEETING;
-                map_image_set(grid_offset, native_image + 2);
-                map_image_set(grid_offset + map_grid_delta(1, 0), native_image + 2);
-                map_image_set(grid_offset + map_grid_delta(0, 1), native_image + 2);
-                map_image_set(grid_offset + map_grid_delta(1, 1), native_image + 2);
+                if (!is_headless) {
+                    map_image_set(grid_offset, native_image + 2);
+                    map_image_set(grid_offset + map_grid_delta(1, 0), native_image + 2);
+                    map_image_set(grid_offset + map_grid_delta(0, 1), native_image + 2);
+                    map_image_set(grid_offset + map_grid_delta(1, 1), native_image + 2);
+                }
             } else if (image_id == image_crops) {
                 type = BUILDING_NATIVE_CROPS;
-                map_image_set(grid_offset, image_group(GROUP_BUILDING_FARM_CROPS) + random_bit);
+                if (!is_headless) {
+                    map_image_set(grid_offset, image_group(GROUP_BUILDING_FARM_CROPS) + random_bit);
+                }
             } else { //unknown building
                 map_building_tiles_remove(0, x, y);
                 continue;
@@ -175,7 +198,9 @@ void map_natives_init(void)
                     mark_native_land(b->x, b->y, 1, 3);
                     break;
                 case BUILDING_NATIVE_MONUMENT:
-                    map_building_tiles_add(b->id, b->x, b->y, b->size, building_image_get_for_type(type), TERRAIN_BUILDING);
+                    map_building_tiles_add(b->id, b->x, b->y, b->size,
+                        is_headless ? scenario_image_monument : building_image_get_for_type(type),
+                        TERRAIN_BUILDING);
                     break;
             }
         }

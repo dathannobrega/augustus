@@ -163,6 +163,7 @@ int game_init(void)
 int game_init_headless_server(void)
 {
     model_reset();
+    building_properties_init();
     load_claudius_messages();
     game_state_init();
     resource_init();

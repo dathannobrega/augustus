@@ -4,9 +4,11 @@
 #include "assets/image.h"
 #include "assets/xml.h"
 #include "core/dir.h"
+#include "core/image.h"
 #include "core/log.h"
 #include "graphics/renderer.h"
 #include "core/png_read.h"
+#include "game/game.h"
 
 #include <stdlib.h>
 #include <string.h>
@@ -17,6 +19,37 @@ static struct {
     int asset_lookup[ASSET_MAX_KEY];
     int font_lookup[ASSET_FONT_MAX_KEY];
 } data;
+
+static unsigned int headless_asset_hash(const char *group_name, const char *image_name)
+{
+    const unsigned char *cursor;
+    unsigned int hash = 2166136261u;
+
+    for (cursor = (const unsigned char *) group_name; cursor && *cursor; ++cursor) {
+        hash ^= *cursor;
+        hash *= 16777619u;
+    }
+
+    hash ^= 0xffu;
+    hash *= 16777619u;
+
+    for (cursor = (const unsigned char *) image_name; cursor && *cursor; ++cursor) {
+        hash ^= *cursor;
+        hash *= 16777619u;
+    }
+
+    return hash;
+}
+
+static int headless_asset_placeholder_id(const char *group_name, const char *image_name)
+{
+    /*
+     * Dedicated server never renders these ids, but gameplay still carries image ids
+     * through scenario conversion and building/map bookkeeping. Keep them stable and
+     * non-zero so headless simulation can proceed without shipping visual assets.
+     */
+    return IMAGE_MAIN_ENTRIES + 1 + (int) (headless_asset_hash(group_name, image_name) & 0x00ffffffu);
+}
 
 void assets_init(int force_reload, color_t **main_images, int *main_image_widths)
 {
@@ -105,6 +138,9 @@ int assets_get_group_id(const char *assetlist_name)
     if (group) {
         return group->first_image_index + IMAGE_MAIN_ENTRIES;
     }
+    if (game_is_headless_server()) {
+        return headless_asset_placeholder_id(assetlist_name, "");
+    }
     log_info("Asset group not found: ", assetlist_name, 0);
     return data.roadblock_image_id;
 }
@@ -112,10 +148,16 @@ int assets_get_group_id(const char *assetlist_name)
 int assets_get_image_id(const char *assetlist_name, const char *image_name)
 {
     if (!image_name || !*image_name) {
+        if (game_is_headless_server()) {
+            return headless_asset_placeholder_id(assetlist_name ? assetlist_name : "", "");
+        }
         return data.roadblock_image_id;
     }
     image_groups *group = group_get_from_name(assetlist_name);
     if (!group) {
+        if (game_is_headless_server()) {
+            return headless_asset_placeholder_id(assetlist_name, image_name);
+        }
         log_info("Asset group not found: ", assetlist_name, 0);
         return data.roadblock_image_id;
     }
@@ -125,6 +167,9 @@ int assets_get_image_id(const char *assetlist_name, const char *image_name)
             return img->index + IMAGE_MAIN_ENTRIES;
         }
         img = asset_image_get_from_id(img->index + 1);
+    }
+    if (game_is_headless_server()) {
+        return headless_asset_placeholder_id(assetlist_name, image_name);
     }
     log_info("Asset image not found: ", image_name, 0);
     log_info("Asset group is: ", assetlist_name, 0);
