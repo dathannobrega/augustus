@@ -53,7 +53,7 @@ void mp_dedicated_server_reset_options(void)
     shutdown_requested = 0;
     options.port = NET_DEFAULT_PORT;
     options.max_players = 8;
-    options.dynamic_city_pool = 8;
+    options.dynamic_city_pool = 0;
     options.autosave_interval_sec = MP_AUTOSAVE_DEFAULT_INTERVAL;
     options.advertise_lan = 1;
     options.log_format = MP_DEDICATED_LOG_TEXT;
@@ -89,9 +89,7 @@ void mp_dedicated_server_set_options(const mp_dedicated_server_options *new_opti
     } else if (options.max_players > NET_MAX_PLAYERS) {
         options.max_players = NET_MAX_PLAYERS;
     }
-    if (options.dynamic_city_pool < 1) {
-        options.dynamic_city_pool = options.max_players;
-    } else if (options.dynamic_city_pool > NET_MAX_PLAYERS) {
+    if (options.dynamic_city_pool > NET_MAX_PLAYERS) {
         options.dynamic_city_pool = NET_MAX_PLAYERS;
     }
     if (options.autosave_interval_sec <= 0) {

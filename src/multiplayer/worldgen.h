@@ -107,11 +107,13 @@ void mp_worldgen_clear(void);
 /**
  * Generate extra reserved spawn positions for late joiners.
  * Called after player spawns are generated and locked.
- * @param reserve_count  Number of reserved slots to generate (max 4)
+ * @param reserve_count  Number of reserved slots to preallocate
  * @return Number of reserved spawns actually generated
  */
 int mp_worldgen_generate_reserved_spawns(int reserve_count);
 int mp_worldgen_generate_dynamic_city_pool(int pool_count);
+int mp_worldgen_expand_dynamic_city_pool(int additional_count);
+int mp_worldgen_get_late_join_capacity(void);
 
 /**
  * Assign a reserved spawn to a late joiner.

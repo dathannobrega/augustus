@@ -13,6 +13,7 @@
 #include "worldgen.h"
 #include "game_manifest.h"
 #include "server_rules.h"
+#include "dedicated_server.h"
 #include "mp_debug_log.h"
 #include "empire/city.h"
 #include "network/session.h"
@@ -543,7 +544,14 @@ int mp_session_load_from_buffer(const uint8_t *buffer, uint32_t size)
             const mp_spawn_table *spawn_table = mp_worldgen_get_spawn_table();
             uint8_t restored_max_players = header.player_count;
 
-            if (spawn_table) {
+            if (mp_dedicated_server_is_enabled()) {
+                const mp_dedicated_server_options *options = mp_dedicated_server_get_options();
+                if (options && options->max_players > 0) {
+                    restored_max_players = options->max_players;
+                }
+            }
+
+            if (restored_max_players == 0 && spawn_table) {
                 uint32_t total_capacity = (uint32_t)spawn_table->spawn_count +
                                           (uint32_t)spawn_table->reserved_count;
                 if (total_capacity > 0 && total_capacity <= NET_MAX_PLAYERS) {

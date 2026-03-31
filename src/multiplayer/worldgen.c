@@ -187,66 +187,308 @@ static int city_has_any_trade_resource(const empire_city *city)
     return 0;
 }
 
+static int city_has_valid_empire_object(const empire_city *city, const empire_object **out_obj)
+{
+    const empire_object *obj;
+
+    if (!city || !city->in_use || city->empire_object_id < 0) {
+        return 0;
+    }
+
+    obj = empire_object_get(city->empire_object_id);
+    if (!obj || obj->type != EMPIRE_OBJECT_CITY) {
+        return 0;
+    }
+
+    if (out_obj) {
+        *out_obj = obj;
+    }
+    return 1;
+}
+
+static int city_is_trade_capable(const empire_city *city)
+{
+    if (!city || !city->in_use) {
+        return 0;
+    }
+    return city->route_id > 0 && city_has_any_trade_resource(city);
+}
+
+static int city_is_spawn_candidate(int city_id, const empire_city *city)
+{
+    if (!city || !city->in_use) {
+        return 0;
+    }
+    if (city->type == EMPIRE_CITY_OURS) {
+        return 0;
+    }
+    if (!city_has_valid_empire_object(city, 0)) {
+        return 0;
+    }
+    if (spawn_table.locked && mp_ownership_is_city_player_owned(city_id)) {
+        return 0;
+    }
+    return 1;
+}
+
+static int spawn_table_contains_city(int city_id)
+{
+    for (int i = 0; i < spawn_table.spawn_count; i++) {
+        if (spawn_table.spawns[i].valid &&
+            spawn_table.spawns[i].empire_city_id == city_id) {
+            return 1;
+        }
+    }
+
+    for (int i = 0; i < spawn_table.reserved_count; i++) {
+        if (spawn_table.reserved_spawns[i].empire_city_id == city_id) {
+            return 1;
+        }
+    }
+
+    return 0;
+}
+
+static void compact_reserved_spawns(void)
+{
+    int write_index = 0;
+
+    for (int read_index = 0; read_index < spawn_table.reserved_count; read_index++) {
+        mp_spawn_entry *entry = &spawn_table.reserved_spawns[read_index];
+        if (!entry->valid || entry->empire_city_id < 0) {
+            continue;
+        }
+
+        if (write_index != read_index) {
+            spawn_table.reserved_spawns[write_index] = *entry;
+        }
+        write_index++;
+    }
+
+    while (write_index < spawn_table.reserved_count) {
+        memset(&spawn_table.reserved_spawns[write_index], 0,
+               sizeof(spawn_table.reserved_spawns[write_index]));
+        write_index++;
+    }
+
+    spawn_table.reserved_count = (uint8_t)write_index;
+}
+
+static int count_dynamic_city_candidates(void)
+{
+    int ai_xs[200], ai_ys[200];
+    int ai_count;
+    spawn_candidate candidates[MP_WORLDGEN_MAX_CANDIDATES];
+
+    compact_reserved_spawns();
+
+    ai_count = collect_ai_trade_cities(ai_xs, ai_ys, 200);
+    return collect_procedural_candidates(candidates, MP_WORLDGEN_MAX_CANDIDATES,
+                                         ai_xs, ai_ys, ai_count);
+}
+
+static void collect_storable_resources(resource_type *resources, int *count)
+{
+    int out = 0;
+
+    for (resource_type r = RESOURCE_MIN; r < RESOURCE_MAX; r++) {
+        if (resource_is_storable(r)) {
+            resources[out++] = r;
+        }
+    }
+
+    if (count) {
+        *count = out;
+    }
+}
+
+static void assign_default_trade_profile(empire_city *city, full_empire_object *full)
+{
+    resource_type storable[RESOURCE_MAX];
+    int storable_count = 0;
+    uint32_t hash;
+    int sell_count = 0;
+    int buy_count = 0;
+
+    if (!city || !full || city->route_id <= 0) {
+        return;
+    }
+
+    collect_storable_resources(storable, &storable_count);
+    if (storable_count <= 0) {
+        return;
+    }
+
+    hash = spawn_table.session_seed ? spawn_table.session_seed : FNV_OFFSET;
+    hash ^= (uint32_t)(city->empire_object_id + 1) * FNV_PRIME;
+    hash ^= (uint32_t)(city->route_id + 17) * 1315423911u;
+
+    for (int i = 0; i < storable_count && (sell_count < 2 || buy_count < 2); i++) {
+        resource_type sell_resource = storable[(hash + (uint32_t)i) % (uint32_t)storable_count];
+        resource_type buy_resource = storable[((hash >> 8) + (uint32_t)(i * 3 + 1)) % (uint32_t)storable_count];
+
+        if (sell_count < 2 && !city->sells_resource[sell_resource]) {
+            city->sells_resource[sell_resource] = 1;
+            full->city_sells_resource[sell_resource] = 1500;
+            trade_route_set(city->route_id, sell_resource, 1500, 0);
+            sell_count++;
+        }
+
+        if (buy_count < 2 &&
+            buy_resource != sell_resource &&
+            !city->buys_resource[buy_resource]) {
+            city->buys_resource[buy_resource] = 1;
+            full->city_buys_resource[buy_resource] = 1500;
+            trade_route_set(city->route_id, buy_resource, 1500, 1);
+            buy_count++;
+        }
+    }
+
+    if (sell_count == 0) {
+        resource_type fallback = storable[(hash + 3u) % (uint32_t)storable_count];
+        city->sells_resource[fallback] = 1;
+        full->city_sells_resource[fallback] = 1500;
+        trade_route_set(city->route_id, fallback, 1500, 0);
+    }
+
+    if (buy_count == 0) {
+        resource_type fallback = storable[(hash + 7u) % (uint32_t)storable_count];
+        if (!city->sells_resource[fallback]) {
+            city->buys_resource[fallback] = 1;
+            full->city_buys_resource[fallback] = 1500;
+            trade_route_set(city->route_id, fallback, 1500, 1);
+        }
+    }
+}
+
+static int prepare_city_for_multiplayer(int city_id)
+{
+    empire_city *city = empire_city_get(city_id);
+    full_empire_object *full;
+    int route_id;
+
+    if (!city_is_spawn_candidate(city_id, city)) {
+        return 0;
+    }
+
+    full = empire_object_get_full(city->empire_object_id);
+    if (!full) {
+        return 0;
+    }
+
+    if (city->type != EMPIRE_CITY_TRADE &&
+        city->type != EMPIRE_CITY_FUTURE_TRADE &&
+        city->type != EMPIRE_CITY_DISTANT_ROMAN) {
+        city->type = EMPIRE_CITY_TRADE;
+        full->city_type = EMPIRE_CITY_TRADE;
+    }
+
+    route_id = city->route_id > 0 ? city->route_id : full->obj.trade_route_id;
+    if (route_id <= 0) {
+        route_id = trade_route_new();
+    } else {
+        trade_route_ensure_id(route_id);
+    }
+    city->route_id = route_id;
+    full->obj.trade_route_id = route_id;
+
+    if (city->cost_to_open <= 0) {
+        city->cost_to_open = full->trade_route_cost > 0 ? full->trade_route_cost : 500;
+    }
+    full->trade_route_cost = city->cost_to_open;
+
+    city->is_open = 1;
+    full->trade_route_open = 1;
+
+    if (city->trader_entry_delay <= 0) {
+        city->trader_entry_delay = 4;
+    }
+
+    if (!city_has_any_trade_resource(city)) {
+        assign_default_trade_profile(city, full);
+    } else {
+        for (resource_type r = RESOURCE_MIN; r < RESOURCE_MAX; r++) {
+            if (city->sells_resource[r]) {
+                int amount = full->city_sells_resource[r] > 0 ? full->city_sells_resource[r] : 1500;
+                full->city_sells_resource[r] = amount;
+                trade_route_set(route_id, r, amount, 0);
+            }
+            if (city->buys_resource[r]) {
+                int amount = full->city_buys_resource[r] > 0 ? full->city_buys_resource[r] : 1500;
+                full->city_buys_resource[r] = amount;
+                trade_route_set(route_id, r, amount, 1);
+            }
+        }
+    }
+
+    city->is_sea_trade = empire_object_is_sea_trade_route(full->obj.trade_route_id);
+    return 1;
+}
+
+static int prepare_spawn_entry_city(mp_spawn_entry *entry)
+{
+    empire_city *city;
+    const empire_object *obj;
+
+    if (!entry || !entry->valid) {
+        return 0;
+    }
+    if (!prepare_city_for_multiplayer(entry->empire_city_id)) {
+        return 0;
+    }
+
+    city = empire_city_get(entry->empire_city_id);
+    if (!city || !city_has_valid_empire_object(city, &obj)) {
+        return 0;
+    }
+
+    entry->empire_object_id = city->empire_object_id;
+    entry->x = obj->x;
+    entry->y = obj->y;
+    entry->is_sea_trade = city->is_sea_trade ? 1 : 0;
+    entry->is_land_trade = city->is_sea_trade ? 0 : 1;
+    return 1;
+}
+
 static int collect_procedural_candidates(spawn_candidate *candidates, int max_candidates,
                                           const int *ai_xs, const int *ai_ys, int ai_count)
 {
     int count = 0;
-    int rejected_no_route = 0;
-    int rejected_no_trade = 0;
     int num_cities = empire_city_get_array_size();
 
-    /* Look for trade cities (AI) that could be repurposed or cities near good positions */
+    /* Look for any city that can be promoted into a player-owned multiplayer city. */
     for (int i = 0; i < num_cities && count < max_candidates; i++) {
         empire_city *city = empire_city_get(i);
-        if (!city || !city->in_use) {
-            continue;
-        }
-        /* Only consider cities that are trade-capable and not "ours" */
-        if (city->type != EMPIRE_CITY_TRADE &&
-            city->type != EMPIRE_CITY_FUTURE_TRADE &&
-            city->type != EMPIRE_CITY_DISTANT_ROMAN) {
+        const empire_object *obj = 0;
+        int is_trade_ready;
+        int ai_dist;
+
+        if (!city_is_spawn_candidate(i, city)) {
             continue;
         }
 
-        /* HARDENING: Reject cities without a valid route_id.
-         * A city without a route_id cannot participate in trade mechanics. */
-        if (city->route_id < 0) {
-            rejected_no_route++;
+        if (spawn_table_contains_city(i)) {
             continue;
         }
 
-        /* HARDENING: Reject cities that don't buy or sell any resource.
-         * A city with no trade resources has no economic viability. */
-        if (!city_has_any_trade_resource(city)) {
-            rejected_no_trade++;
+        if (!city_has_valid_empire_object(city, &obj)) {
             continue;
         }
 
-        const empire_object *obj = empire_object_get(city->empire_object_id);
-        if (!obj) {
-            continue;
-        }
-
-        int ai_dist = compute_ai_min_distance(obj->x, obj->y, ai_xs, ai_ys, ai_count);
+        is_trade_ready = city_is_trade_capable(city);
+        ai_dist = compute_ai_min_distance(obj->x, obj->y, ai_xs, ai_ys, ai_count);
 
         candidates[count].city_id = i;
         candidates[count].object_id = city->empire_object_id;
         candidates[count].x = obj->x;
         candidates[count].y = obj->y;
-        candidates[count].is_sea = city->is_sea_trade;
-        candidates[count].is_land = !city->is_sea_trade;
-        candidates[count].route_cost = city->cost_to_open;
+        candidates[count].is_sea = is_trade_ready ? city->is_sea_trade : 0;
+        candidates[count].is_land = is_trade_ready ? !city->is_sea_trade : 1;
+        candidates[count].route_cost = city->cost_to_open > 0 ? city->cost_to_open : 500;
         candidates[count].is_xml_slot = 0;
         candidates[count].xml_slot_id = -1;
         candidates[count].ai_distance = ai_dist;
         count++;
-    }
-
-    if (rejected_no_route > 0) {
-        log_info("Worldgen: rejected cities without route_id", 0, rejected_no_route);
-    }
-    if (rejected_no_trade > 0) {
-        log_info("Worldgen: rejected cities without trade resources", 0, rejected_no_trade);
     }
 
     return count;
@@ -579,6 +821,11 @@ int mp_worldgen_apply_spawns(void)
             continue;
         }
 
+        if (!prepare_spawn_entry_city(entry)) {
+            log_error("Worldgen: failed to prepare city for slot", 0, entry->slot_id);
+            continue;
+        }
+
         /* Mark the city as player-owned in ownership system */
         mp_player *player = mp_player_registry_get_by_slot(entry->slot_id);
         if (player) {
@@ -603,54 +850,74 @@ int mp_worldgen_apply_spawns(void)
 
 /* ---- Reserved spawns for late join ---- */
 
+int mp_worldgen_expand_dynamic_city_pool(int additional_count)
+{
+    int capacity;
+    int ai_xs[200], ai_ys[200];
+    int ai_count;
+    spawn_candidate candidates[MP_WORLDGEN_MAX_CANDIDATES];
+    spawn_candidate filtered[MP_WORLDGEN_MAX_CANDIDATES];
+    int candidate_count;
+    int filtered_count = 0;
+    int selected;
+    mp_spawn_entry temp_spawns[MP_WORLDGEN_MAX_SPAWNS];
+
+    if (additional_count <= 0) {
+        return 0;
+    }
+
+    compact_reserved_spawns();
+
+    capacity = MP_WORLDGEN_MAX_SPAWNS -
+               (spawn_table.spawn_count + mp_worldgen_get_reserved_count());
+    if (capacity <= 0) {
+        return 0;
+    }
+    if (additional_count > capacity) {
+        additional_count = capacity;
+    }
+
+    ai_count = collect_ai_trade_cities(ai_xs, ai_ys, 200);
+    candidate_count = collect_procedural_candidates(
+        candidates, MP_WORLDGEN_MAX_CANDIDATES, ai_xs, ai_ys, ai_count);
+
+    for (int c = 0; c < candidate_count; c++) {
+        if (!spawn_table_contains_city(candidates[c].city_id)) {
+            filtered[filtered_count++] = candidates[c];
+        }
+    }
+
+    memset(temp_spawns, 0, sizeof(temp_spawns));
+    selected = select_spawns_from_candidates(filtered, filtered_count,
+        temp_spawns, additional_count, ai_xs, ai_ys, ai_count);
+
+    for (int i = 0; i < selected && spawn_table.reserved_count < MP_WORLDGEN_MAX_SPAWNS; i++) {
+        int target = spawn_table.reserved_count++;
+        spawn_table.reserved_spawns[target] = temp_spawns[i];
+        spawn_table.reserved_spawns[target].slot_id = 0xFF;
+        spawn_table.reserved_spawns[target].valid = 1;
+    }
+
+    if (selected > 0) {
+        log_info("Worldgen: dynamic pool expanded", 0, selected);
+    }
+    return selected;
+}
+
 int mp_worldgen_generate_reserved_spawns(int reserve_count)
 {
     if (reserve_count <= 0) {
+        memset(spawn_table.reserved_spawns, 0, sizeof(spawn_table.reserved_spawns));
+        spawn_table.reserved_count = 0;
         return 0;
     }
     if (reserve_count > MP_WORLDGEN_MAX_SPAWNS) {
         reserve_count = MP_WORLDGEN_MAX_SPAWNS;
     }
 
-    /* Collect AI city positions for distance checks */
-    int ai_xs[200], ai_ys[200];
-    int ai_count = collect_ai_trade_cities(ai_xs, ai_ys, 200);
-
-    spawn_candidate candidates[MP_WORLDGEN_MAX_CANDIDATES];
-    int candidate_count = collect_procedural_candidates(
-        candidates, MP_WORLDGEN_MAX_CANDIDATES, ai_xs, ai_ys, ai_count);
-
-    /* Filter out candidates already used by player spawns */
-    spawn_candidate filtered[MP_WORLDGEN_MAX_CANDIDATES];
-    int filtered_count = 0;
-    for (int c = 0; c < candidate_count; c++) {
-        int already_used = 0;
-        for (int s = 0; s < spawn_table.spawn_count; s++) {
-            if (spawn_table.spawns[s].valid &&
-                spawn_table.spawns[s].empire_city_id == candidates[c].city_id) {
-                already_used = 1;
-                break;
-            }
-        }
-        if (!already_used) {
-            filtered[filtered_count++] = candidates[c];
-        }
-    }
-
-    /* Select from filtered candidates */
-    mp_spawn_entry temp_spawns[MP_WORLDGEN_MAX_SPAWNS];
-    memset(temp_spawns, 0, sizeof(temp_spawns));
-
-    int selected = select_spawns_from_candidates(filtered, filtered_count,
-        temp_spawns, reserve_count, ai_xs, ai_ys, ai_count);
-
-    /* Copy to reserved_spawns */
+    memset(spawn_table.reserved_spawns, 0, sizeof(spawn_table.reserved_spawns));
     spawn_table.reserved_count = 0;
-    for (int i = 0; i < selected && i < MP_WORLDGEN_MAX_SPAWNS; i++) {
-        spawn_table.reserved_spawns[i] = temp_spawns[i];
-        spawn_table.reserved_spawns[i].slot_id = 0xFF; /* Unassigned */
-        spawn_table.reserved_count++;
-    }
+    mp_worldgen_expand_dynamic_city_pool(reserve_count);
 
     log_info("Worldgen: reserved spawns generated", 0, spawn_table.reserved_count);
     return spawn_table.reserved_count;
@@ -663,16 +930,28 @@ int mp_worldgen_generate_dynamic_city_pool(int pool_count)
 
 int mp_worldgen_assign_reserved_spawn(uint8_t slot_id)
 {
+    compact_reserved_spawns();
+
     for (int i = 0; i < spawn_table.reserved_count; i++) {
         if (spawn_table.reserved_spawns[i].valid) {
             int city_id = spawn_table.reserved_spawns[i].empire_city_id;
             mp_spawn_entry activated = spawn_table.reserved_spawns[i];
-            spawn_table.reserved_spawns[i].slot_id = slot_id;
-            spawn_table.reserved_spawns[i].valid = 0; /* Mark as consumed */
+
+            activated.slot_id = slot_id;
+            activated.valid = 1;
+            if (!prepare_spawn_entry_city(&activated)) {
+                log_error("Worldgen: failed to prepare reserved city", 0, city_id);
+                continue;
+            }
+
+            for (int move = i; move + 1 < spawn_table.reserved_count; move++) {
+                spawn_table.reserved_spawns[move] = spawn_table.reserved_spawns[move + 1];
+            }
+            memset(&spawn_table.reserved_spawns[spawn_table.reserved_count - 1], 0,
+                   sizeof(spawn_table.reserved_spawns[spawn_table.reserved_count - 1]));
+            spawn_table.reserved_count--;
 
             if (spawn_table.spawn_count < MP_WORLDGEN_MAX_SPAWNS) {
-                activated.slot_id = slot_id;
-                activated.valid = 1;
                 spawn_table.spawns[spawn_table.spawn_count++] = activated;
                 spawn_table.player_count = spawn_table.spawn_count;
             }
@@ -686,26 +965,28 @@ int mp_worldgen_assign_reserved_spawn(uint8_t slot_id)
 
 void mp_worldgen_return_to_reserved(int empire_city_id)
 {
-    for (int i = 0; i < spawn_table.reserved_count; i++) {
-        if (!spawn_table.reserved_spawns[i].valid &&
-            spawn_table.reserved_spawns[i].empire_city_id == empire_city_id) {
-            spawn_table.reserved_spawns[i].valid = 1;
-            spawn_table.reserved_spawns[i].slot_id = 0xFF;
+    compact_reserved_spawns();
 
-            for (int s = 0; s < spawn_table.spawn_count; s++) {
-                if (spawn_table.spawns[s].valid &&
-                    spawn_table.spawns[s].empire_city_id == empire_city_id) {
-                    for (int move = s; move + 1 < spawn_table.spawn_count; move++) {
-                        spawn_table.spawns[move] = spawn_table.spawns[move + 1];
-                    }
-                    memset(&spawn_table.spawns[spawn_table.spawn_count - 1], 0,
-                           sizeof(spawn_table.spawns[spawn_table.spawn_count - 1]));
-                    spawn_table.spawn_count--;
-                    if (spawn_table.player_count > spawn_table.spawn_count) {
-                        spawn_table.player_count = spawn_table.spawn_count;
-                    }
-                    break;
-                }
+    for (int s = 0; s < spawn_table.spawn_count; s++) {
+        if (spawn_table.spawns[s].valid &&
+            spawn_table.spawns[s].empire_city_id == empire_city_id) {
+            mp_spawn_entry returned = spawn_table.spawns[s];
+
+            returned.valid = 1;
+            returned.slot_id = 0xFF;
+
+            for (int move = s; move + 1 < spawn_table.spawn_count; move++) {
+                spawn_table.spawns[move] = spawn_table.spawns[move + 1];
+            }
+            memset(&spawn_table.spawns[spawn_table.spawn_count - 1], 0,
+                   sizeof(spawn_table.spawns[spawn_table.spawn_count - 1]));
+            spawn_table.spawn_count--;
+            if (spawn_table.player_count > spawn_table.spawn_count) {
+                spawn_table.player_count = spawn_table.spawn_count;
+            }
+
+            if (spawn_table.reserved_count < MP_WORLDGEN_MAX_SPAWNS) {
+                spawn_table.reserved_spawns[spawn_table.reserved_count++] = returned;
             }
 
             log_info("Worldgen: returned city to reserved pool", 0, empire_city_id);
@@ -725,9 +1006,35 @@ int mp_worldgen_get_reserved_count(void)
     return count;
 }
 
+int mp_worldgen_get_late_join_capacity(void)
+{
+    int reserved;
+    int slot_capacity;
+    int candidate_capacity;
+
+    compact_reserved_spawns();
+
+    slot_capacity = MP_WORLDGEN_MAX_SPAWNS - spawn_table.spawn_count;
+    if (slot_capacity <= 0) {
+        return 0;
+    }
+
+    reserved = mp_worldgen_get_reserved_count();
+    if (reserved >= slot_capacity) {
+        return slot_capacity;
+    }
+
+    candidate_capacity = count_dynamic_city_candidates();
+    if (candidate_capacity > slot_capacity - reserved) {
+        candidate_capacity = slot_capacity - reserved;
+    }
+
+    return reserved + candidate_capacity;
+}
+
 int mp_worldgen_get_dynamic_city_pool_remaining(void)
 {
-    return mp_worldgen_get_reserved_count();
+    return mp_worldgen_get_late_join_capacity();
 }
 
 /* ---- Serialization ---- */
@@ -827,6 +1134,20 @@ void mp_worldgen_deserialize(const uint8_t *buffer, uint32_t size)
             e->fairness_score = net_read_i32(&s);
         }
     }
+
+    for (int i = 0; i < spawn_table.spawn_count; i++) {
+        if (spawn_table.spawns[i].valid) {
+            prepare_spawn_entry_city(&spawn_table.spawns[i]);
+        }
+    }
+
+    for (int i = 0; i < spawn_table.reserved_count; i++) {
+        if (spawn_table.reserved_spawns[i].empire_city_id >= 0) {
+            prepare_spawn_entry_city(&spawn_table.reserved_spawns[i]);
+        }
+    }
+
+    compact_reserved_spawns();
 }
 
 #endif /* ENABLE_MULTIPLAYER */

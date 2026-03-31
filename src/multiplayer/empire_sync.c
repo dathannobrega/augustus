@@ -303,6 +303,17 @@ void mp_empire_sync_deserialize(const uint8_t *buffer, uint32_t size)
             v->stock_level[r] = net_read_i32(&s);
         }
 
+        {
+            empire_city *city = empire_city_get(v->city_id);
+            if (city && city->in_use) {
+                city->remote_online = v->online;
+                for (int r = 0; r < RESOURCE_MAX; r++) {
+                    city->sells_resource[r] = v->exportable[r];
+                    city->buys_resource[r] = v->importable[r];
+                }
+            }
+        }
+
         sync_data.view_count++;
     }
 }

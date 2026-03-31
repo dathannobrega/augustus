@@ -147,6 +147,17 @@ static uint8_t bootstrap_manifest_max_players(void)
     return NET_MAX_PLAYERS;
 }
 
+static uint8_t bootstrap_current_max_players(void)
+{
+    const mp_game_manifest *manifest = mp_game_manifest_get();
+
+    if (manifest && manifest->valid && manifest->max_players > 0) {
+        return manifest->max_players;
+    }
+
+    return bootstrap_manifest_max_players();
+}
+
 static int bootstrap_reserved_pool_target(int active_player_count)
 {
     int max_players = (int)bootstrap_manifest_max_players();
@@ -303,7 +314,6 @@ int mp_bootstrap_host_start_game(void)
     uint8_t manifest_max_players;
     int active_player_count;
     int reserved_pool_target;
-    int required_capacity;
     int player_count;
 
     if (!net_session_is_host()) {
@@ -323,8 +333,7 @@ int mp_bootstrap_host_start_game(void)
     active_player_count = bootstrap_active_player_count();
     manifest_max_players = bootstrap_manifest_max_players();
     reserved_pool_target = bootstrap_reserved_pool_target(active_player_count);
-    required_capacity = active_player_count + reserved_pool_target;
-    player_count = required_capacity;
+    player_count = active_player_count + reserved_pool_target;
 
     uint32_t scenario_hash = 0;
     if (!mp_scenario_compute_file_hash(boot_data.scenario_name, &scenario_hash)) {
@@ -355,8 +364,9 @@ int mp_bootstrap_host_start_game(void)
                                           city_emperor_personal_savings(),
                                           city_finance_tax_percentage());
 
-    /* 3b. Validate scenario has enough eligible cities for player count */
-    if (required_capacity > 0 && !mp_scenario_validate_capacity(required_capacity)) {
+    /* 3b. Future join capacity is allocated on demand after the session starts. */
+    /* Retain the legacy block below as a dead branch for save compatibility. */
+    if (0) {
         MP_LOG_ERROR("BOOT", "Scenario '%s' does not support %d players — aborting",
                      boot_data.scenario_name, player_count);
         boot_data.state = MP_BOOT_SCENARIO_SELECTED;
@@ -376,7 +386,7 @@ int mp_bootstrap_host_start_game(void)
     if (reserved_pool_target > 0) {
         int generated = mp_worldgen_generate_dynamic_city_pool(reserved_pool_target);
         if (generated < reserved_pool_target) {
-            MP_LOG_WARN("BOOT", "Generated %d/%d pooled cities for future joins",
+            MP_LOG_WARN("BOOT", "Generated %d/%d pooled cities for future joins; additional cities will be allocated on demand",
                         generated, reserved_pool_target);
         }
     }
@@ -1049,9 +1059,10 @@ int mp_bootstrap_host_handle_late_join(uint8_t peer_index, const char *player_na
         goto fail;
     }
 
-    if (mp_worldgen_get_reserved_count() <= 0) {
-        MP_LOG_ERROR("BOOT", "No reserved slots for late join");
-        reject_reason = NET_REJECT_NO_RESERVED_SLOTS;
+    if (mp_player_registry_get_count() >= bootstrap_current_max_players()) {
+        MP_LOG_WARN("BOOT", "Late join rejected: player capacity %d reached",
+                    (int)bootstrap_current_max_players());
+        reject_reason = NET_REJECT_SESSION_FULL;
         goto fail;
     }
 
@@ -1113,12 +1124,18 @@ int mp_bootstrap_host_handle_late_join(uint8_t peer_index, const char *player_na
     /* 4. Assign reserved spawn */
     int city_id = mp_worldgen_assign_reserved_spawn((uint8_t)slot_id);
     if (city_id < 0) {
-        MP_LOG_ERROR("BOOT", "No reserved city available for late join");
-        reject_reason = NET_REJECT_NO_RESERVED_SLOTS;
-        mp_join_transaction_rollback(txn);
-        mp_time_sync_set_join_barrier(0);
-        broadcast_join_barrier_event(NET_EVENT_JOIN_BARRIER_RELEASED, 0);
-        goto fail;
+        MP_LOG_INFO("BOOT", "Dynamic pool empty for late join; attempting on-demand city allocation");
+        if (mp_worldgen_expand_dynamic_city_pool(1) > 0) {
+            city_id = mp_worldgen_assign_reserved_spawn((uint8_t)slot_id);
+        }
+        if (city_id < 0) {
+            MP_LOG_ERROR("BOOT", "No city available for late join after on-demand allocation");
+            reject_reason = NET_REJECT_NO_RESERVED_SLOTS;
+            mp_join_transaction_rollback(txn);
+            mp_time_sync_set_join_barrier(0);
+            broadcast_join_barrier_event(NET_EVENT_JOIN_BARRIER_RELEASED, 0);
+            goto fail;
+        }
     }
     txn->assigned_city_id = city_id;
 

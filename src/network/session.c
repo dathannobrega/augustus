@@ -316,6 +316,37 @@ static int has_reconnectable_player(void)
     return 0;
 }
 
+static uint8_t current_session_max_players(void)
+{
+    const mp_game_manifest *manifest = mp_game_manifest_get();
+
+    if (manifest && manifest->valid && manifest->max_players > 0) {
+        return manifest->max_players;
+    }
+
+    if (mp_dedicated_server_is_enabled()) {
+        const mp_dedicated_server_options *options = mp_dedicated_server_get_options();
+        if (options && options->max_players > 0) {
+            return options->max_players;
+        }
+    }
+
+    return NET_MAX_PLAYERS;
+}
+
+static int current_open_player_slots(void)
+{
+    int available = (int)current_session_max_players() - mp_player_registry_get_count();
+    return available > 0 ? available : 0;
+}
+
+static int current_late_join_capacity(void)
+{
+    int city_capacity = mp_worldgen_get_late_join_capacity();
+    int player_slots = current_open_player_slots();
+    return city_capacity < player_slots ? city_capacity : player_slots;
+}
+
 static net_discovery_session_phase current_discovery_phase(void)
 {
     if (session.state == NET_SESSION_HOSTING_GAME) {
@@ -343,7 +374,7 @@ static net_discovery_join_policy current_discovery_join_policy(void)
         if (mp_bootstrap_is_late_join_busy() || mp_bootstrap_is_reconnect_busy()) {
             return NET_DISCOVERY_JOIN_CLOSED;
         }
-        if (mp_worldgen_get_reserved_count() > 0) {
+        if (current_late_join_capacity() > 0) {
             return NET_DISCOVERY_JOIN_LATE_JOIN_ALLOWED;
         }
         if (has_reconnectable_player()) {
@@ -356,9 +387,7 @@ static net_discovery_join_policy current_discovery_join_policy(void)
 
 static void build_discovery_announcement(net_discovery_announcement *announcement)
 {
-    const mp_game_manifest *manifest = mp_game_manifest_get();
     uint8_t player_count = (uint8_t)mp_player_registry_get_count();
-    uint8_t max_players = NET_MAX_PLAYERS;
 
     if (!announcement) {
         return;
@@ -368,31 +397,25 @@ static void build_discovery_announcement(net_discovery_announcement *announcemen
     copy_text(announcement->host_name, sizeof(announcement->host_name),
               session.local_player_name);
     announcement->game_port = session.port;
-    if (mp_dedicated_server_is_enabled()) {
-        const mp_dedicated_server_options *options = mp_dedicated_server_get_options();
-        if (options) {
-            max_players = options->max_players;
-        }
-    }
 
     announcement->player_count = player_count;
-    if (manifest && manifest->valid) {
-        if (manifest->max_players > 0) {
-            max_players = manifest->max_players;
-        }
-        if (session.role == NET_ROLE_HOST) {
+    {
+        const mp_game_manifest *manifest = mp_game_manifest_get();
+        if (manifest && manifest->valid && session.role == NET_ROLE_HOST) {
             mp_game_manifest_set_player_count(announcement->player_count);
         }
-        memcpy(announcement->world_instance_uuid,
-               manifest->world_instance_uuid,
-               MP_WORLD_UUID_SIZE);
+        if (manifest && manifest->valid) {
+            memcpy(announcement->world_instance_uuid,
+                   manifest->world_instance_uuid,
+                   MP_WORLD_UUID_SIZE);
+        }
     }
-    announcement->max_players = max_players;
+    announcement->max_players = current_session_max_players();
+    announcement->reserved_slots_free = (uint8_t)current_late_join_capacity();
     announcement->session_id = session.session_id;
     announcement->protocol_version = NET_PROTOCOL_VERSION;
     announcement->session_phase = (uint8_t)current_discovery_phase();
     announcement->join_policy = (uint8_t)current_discovery_join_policy();
-    announcement->reserved_slots_free = (uint8_t)mp_worldgen_get_reserved_count();
     announcement->resume_generation = current_resume_generation();
 }
 
@@ -786,7 +809,7 @@ static void handle_hello_impl(net_peer *peer, const uint8_t *payload, uint32_t s
     uint8_t current_world_uuid[MP_WORLD_UUID_SIZE];
     int peer_index;
     int has_uuid;
-    int reserved_slots;
+    int late_join_capacity;
     mp_player *existing;
 
     memset(name, 0, sizeof(name));
@@ -876,7 +899,7 @@ static void handle_hello_impl(net_peer *peer, const uint8_t *payload, uint32_t s
     peer_index = find_peer_index(peer);
     has_uuid = uuid_is_nonzero(player_uuid, MP_PLAYER_UUID_SIZE);
     existing = has_uuid ? mp_player_registry_get_by_uuid(player_uuid) : NULL;
-    reserved_slots = mp_worldgen_get_reserved_count();
+    late_join_capacity = current_late_join_capacity();
 
     if (mp_dedicated_server_is_banned(has_uuid ? player_uuid : NULL,
                                       peer->remote_address)) {
@@ -984,13 +1007,17 @@ static void handle_hello_impl(net_peer *peer, const uint8_t *payload, uint32_t s
             reject_peer(peer, NET_REJECT_LATE_JOIN_BUSY, "late_join_busy");
             return;
         }
-        if (reserved_slots > 0) {
+        if (late_join_capacity > 0) {
             uint8_t late_join_reject_reason = NET_REJECT_INTERNAL_ERROR;
 
             if (peer_index < 0) {
                 reject_peer(peer, NET_REJECT_INTERNAL_ERROR, "late_join_missing_peer_index");
                 return;
             }
+            MP_LOG_INFO("HANDSHAKE",
+                        "Attempting late join for '%s' -- capacity=%d (reserved=%d, player_slots=%d)",
+                        name, late_join_capacity, mp_worldgen_get_reserved_count(),
+                        current_open_player_slots());
             if (mp_bootstrap_host_handle_late_join((uint8_t)peer_index, name,
                                                    &late_join_reject_reason)) {
                 net_session_refresh_discovery_announcement();
@@ -1003,7 +1030,11 @@ static void handle_hello_impl(net_peer *peer, const uint8_t *payload, uint32_t s
             reject_peer(peer, NET_REJECT_RECONNECT_REQUIRED, "reconnect_only");
             return;
         }
-        reject_peer(peer, NET_REJECT_GAME_IN_PROGRESS, "game_closed");
+        if (current_open_player_slots() <= 0) {
+            reject_peer(peer, NET_REJECT_SESSION_FULL, "game_player_capacity_reached");
+            return;
+        }
+        reject_peer(peer, NET_REJECT_NO_RESERVED_SLOTS, "game_city_capacity_exhausted");
         return;
     }
 
@@ -1026,6 +1057,11 @@ static void handle_hello_impl(net_peer *peer, const uint8_t *payload, uint32_t s
         mp_player *new_player;
         uint32_t now = net_tcp_get_timestamp_ms();
         uint32_t session_seed = mp_worldgen_get_spawn_table_mutable()->session_seed;
+
+        if (current_open_player_slots() <= 0) {
+            reject_peer(peer, NET_REJECT_SESSION_FULL, "lobby_capacity_reached");
+            return;
+        }
 
         for (int i = first_assignable_player_id(); i < MP_MAX_PLAYERS; i++) {
             mp_player *candidate = mp_player_registry_get((uint8_t)i);
@@ -1247,9 +1283,9 @@ static void handle_hello(net_peer *peer, const uint8_t *payload, uint32_t size)
             return; /* Reconnect succeeded */
         }
 
-        /* Phase 6: Try late join if reserved slots available */
+        /* Phase 6: Try late join; the bootstrap path can backfill cities on demand. */
         {
-            if (mp_worldgen_get_reserved_count() > 0) {
+            if (1 /* dynamic late-join allocator decides final capacity */) {
                 MP_LOG_INFO("HANDSHAKE", "Attempting late join for '%s' — %d reserved slots available",
                             name, mp_worldgen_get_reserved_count());
                 int peer_index = -1;
