@@ -72,12 +72,12 @@ void window_request_refresh(void)
 
 int window_is(window_id id)
 {
-    return data.current_window->id == id;
+    return data.current_window && data.current_window->id == id;
 }
 
 window_id window_get_id(void)
 {
-    return data.current_window->id;
+    return data.current_window ? data.current_window->id : WINDOW_ID_COUNT;
 }
 
 void window_show(const window_type *window)

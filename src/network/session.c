@@ -560,28 +560,71 @@ static void handle_peer_disconnect(int peer_index)
     }
 }
 
+static int flush_peer_send_queue(net_peer *peer);
+
 static void send_raw_to_peer(net_peer *peer, uint16_t message_type,
                              const uint8_t *payload, uint32_t size)
 {
-    size_t encoded = net_codec_encode(&peer->codec,
-                                      message_type,
-                                      session.session_id,
-                                      session.authoritative_tick,
-                                      payload, size,
-                                      peer->send_buffer,
-                                      sizeof(peer->send_buffer));
+    size_t encoded;
+
+    if (!peer || !peer->active || peer->socket_fd < 0) {
+        return;
+    }
+
+    encoded = net_codec_encode(&peer->codec,
+                               message_type,
+                               session.session_id,
+                               session.authoritative_tick,
+                               payload, size,
+                               peer->send_buffer,
+                               sizeof(peer->send_buffer));
     if (encoded == 0) {
         log_error("Failed to encode packet", net_protocol_message_name(message_type), 0);
         return;
     }
 
-    int sent = net_tcp_send(peer->socket_fd, peer->send_buffer, encoded);
-    if (sent < 0) {
+    if (peer->send_queue_bytes + encoded > sizeof(peer->send_queue)) {
+        MP_LOG_ERROR("NET",
+                     "Outgoing queue overflow for peer '%s': queued=%u packet=%u capacity=%u",
+                     peer->name,
+                     (unsigned int)peer->send_queue_bytes,
+                     (unsigned int)encoded,
+                     (unsigned int)sizeof(peer->send_queue));
         log_error("Failed to send to peer", peer->name, 0);
         return;
     }
-    peer->bytes_sent += sent;
+
+    memcpy(peer->send_queue + peer->send_queue_bytes, peer->send_buffer, encoded);
+    peer->send_queue_bytes += (uint32_t)encoded;
     peer->packets_sent++;
+
+    if (!flush_peer_send_queue(peer)) {
+        log_error("Failed to send to peer", peer->name, 0);
+    }
+}
+
+static int flush_peer_send_queue(net_peer *peer)
+{
+    while (peer && peer->active && peer->send_queue_bytes > 0) {
+        int sent = net_tcp_send(peer->socket_fd, peer->send_queue,
+                                peer->send_queue_bytes);
+        if (sent < 0) {
+            return 0;
+        }
+        if (sent == 0) {
+            return 1;
+        }
+
+        peer->bytes_sent += (uint32_t)sent;
+
+        if ((uint32_t)sent < peer->send_queue_bytes) {
+            memmove(peer->send_queue,
+                    peer->send_queue + sent,
+                    peer->send_queue_bytes - (uint32_t)sent);
+        }
+        peer->send_queue_bytes -= (uint32_t)sent;
+    }
+    return 1;
 }
 
 static uint32_t next_heartbeat_sample_id(void)
@@ -1529,6 +1572,7 @@ static void handle_client_message(net_peer *peer, const net_packet_header *heade
             break;
         }
         case NET_MSG_GAME_LOAD_COMPLETE: {
+            uint8_t peer_index = (uint8_t)(peer - session.peers);
             /* Client reports scenario loaded — track for loading barrier */
             MP_LOG_INFO("BOOT", "Peer '%s' (player %d) reports scenario loaded",
                         peer->name, (int)peer->player_id);
@@ -1536,12 +1580,19 @@ static void handle_client_message(net_peer *peer, const net_packet_header *heade
             /* If this peer was in LOADING state (join barrier active),
              * transition to IN_GAME and release the barrier */
             if (peer->state == PEER_STATE_LOADING) {
+                if (!mp_bootstrap_host_accepts_load_complete(peer_index)) {
+                    MP_LOG_WARN("BOOT",
+                                "Ignoring early GAME_LOAD_COMPLETE from peer %d while transfer is still in progress",
+                                (int)peer->player_id);
+                    break;
+                }
+
                 peer->state = PEER_STATE_IN_GAME;
                 mp_player_registry_set_status(peer->player_id, MP_PLAYER_IN_GAME);
 
                 /* Commit the join transaction */
                 mp_join_transaction *txn = mp_join_transaction_find_by_peer(
-                    (uint8_t)(peer - session.peers));
+                    peer_index);
                 if (txn && txn->active) {
                     mp_join_transaction_commit(txn);
                     broadcast_full_snapshot_to_in_game_peers();
@@ -1558,9 +1609,9 @@ static void handle_client_message(net_peer *peer, const net_packet_header *heade
                                                       (uint32_t)net_serializer_position(&es));
                     }
 
-                    mp_bootstrap_host_complete_late_join((uint8_t)(peer - session.peers));
+                    mp_bootstrap_host_complete_late_join(peer_index);
                 } else {
-                    mp_bootstrap_host_complete_reconnect((uint8_t)(peer - session.peers));
+                    mp_bootstrap_host_complete_reconnect(peer_index);
                 }
 
                 MP_LOG_INFO("BOOT", "Join barrier released: player %d fully loaded",
@@ -1848,10 +1899,18 @@ static void handle_host_message(const net_packet_header *header,
         }
         case NET_MSG_SAVE_TRANSFER_BEGIN: {
             mp_save_transfer_client_receive_begin(payload, size);
+            if (mp_save_transfer_get_state() == MP_TRANSFER_FAILED) {
+                MP_LOG_ERROR("TRANSFER", "Client failed while starting save transfer — disconnecting");
+                session.state = NET_SESSION_DISCONNECTING;
+            }
             break;
         }
         case NET_MSG_SAVE_TRANSFER_CHUNK: {
             mp_save_transfer_client_receive_chunk(payload, size);
+            if (mp_save_transfer_get_state() == MP_TRANSFER_FAILED) {
+                MP_LOG_ERROR("TRANSFER", "Client failed while receiving save transfer chunk — disconnecting");
+                session.state = NET_SESSION_DISCONNECTING;
+            }
             break;
         }
         case NET_MSG_SAVE_TRANSFER_COMPLETE: {
@@ -1867,6 +1926,9 @@ static void handle_host_message(const net_packet_header *header,
                     net_session_send_to_host(NET_MSG_GAME_LOAD_COMPLETE,
                                              ack_buf, (uint32_t)net_serializer_position(&ls));
                 }
+            } else if (mp_save_transfer_get_state() == MP_TRANSFER_FAILED) {
+                MP_LOG_ERROR("TRANSFER", "Client failed while finalizing save transfer — disconnecting");
+                session.state = NET_SESSION_DISCONNECTING;
             }
             break;
         }
@@ -1940,6 +2002,12 @@ static void host_process_peers(void)
             continue;
         }
 
+        if (!flush_peer_send_queue(peer)) {
+            log_error("Peer connection lost", peer->name, i);
+            handle_peer_disconnect(i);
+            continue;
+        }
+
         /* Check timeout */
         if (peer->state != PEER_STATE_CONNECTING && net_peer_is_timed_out(peer, now)) {
             log_error("Peer timed out", peer->name, i);
@@ -2010,6 +2078,16 @@ static void client_process_host(void)
         peer->state != PEER_STATE_HELLO_SENT &&
         net_peer_is_timed_out(peer, now)) {
         log_error("Host connection timed out", 0, 0);
+        session.state = NET_SESSION_DISCONNECTING;
+        return;
+    }
+
+    if (!flush_peer_send_queue(peer)) {
+        MP_LOG_ERROR("NET", "Host connection lost while flushing outbound queue");
+        log_error("Host connection lost", 0, 0);
+        if (session.state == NET_SESSION_JOINING) {
+            join_status = NET_JOIN_STATUS_FAILED;
+        }
         session.state = NET_SESSION_DISCONNECTING;
         return;
     }

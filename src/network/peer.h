@@ -8,6 +8,9 @@
 
 #include <stdint.h>
 
+#define NET_MAX_ENCODED_FRAME_SIZE (NET_FRAME_PREFIX_SIZE + NET_MAX_FRAME_SIZE)
+#define NET_SEND_QUEUE_CAPACITY    (NET_MAX_ENCODED_FRAME_SIZE * 8)
+
 typedef enum {
     PEER_STATE_DISCONNECTED = 0,
     PEER_STATE_CONNECTING,
@@ -55,8 +58,10 @@ typedef struct {
     uint32_t packets_received;
     uint32_t packets_lost;
 
-    /* Send buffer for outgoing data */
-    uint8_t send_buffer[NET_FRAME_PREFIX_SIZE + NET_MAX_FRAME_SIZE];
+    /* Temporary frame buffer plus queued bytes for non-blocking sends. */
+    uint8_t send_buffer[NET_MAX_ENCODED_FRAME_SIZE];
+    uint8_t send_queue[NET_SEND_QUEUE_CAPACITY];
+    uint32_t send_queue_bytes;
 } net_peer;
 
 #define NET_MAX_PEERS NET_MAX_PLAYERS

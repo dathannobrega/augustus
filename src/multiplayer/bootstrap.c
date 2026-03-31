@@ -857,6 +857,7 @@ void mp_bootstrap_client_save_transfer_complete(void)
 
     if (!save_data || save_size == 0) {
         MP_LOG_ERROR("BOOT", "No save data after transfer");
+        net_session_disconnect();
         return;
     }
 
@@ -864,6 +865,7 @@ void mp_bootstrap_client_save_transfer_complete(void)
     const char *temp_path = mp_safe_file_get_save_path("mp_resume_received.sav");
     if (!mp_safe_file_write(temp_path, NULL, save_data, save_size)) {
         MP_LOG_ERROR("BOOT", "Failed to write temp save file: %s", temp_path);
+        net_session_disconnect();
         return;
     }
 
@@ -872,6 +874,7 @@ void mp_bootstrap_client_save_transfer_complete(void)
     if (load_result != 1) {
         MP_LOG_ERROR("BOOT", "Failed to load transferred save (result=%d)", load_result);
         platform_file_manager_remove_file(temp_path);
+        net_session_disconnect();
         return;
     }
 
@@ -1044,6 +1047,21 @@ void mp_bootstrap_host_complete_late_join(uint8_t peer_index)
     memset(&boot_data.late_join, 0, sizeof(boot_data.late_join));
 }
 
+int mp_bootstrap_host_accepts_load_complete(uint8_t peer_index)
+{
+    if (boot_data.late_join.active && boot_data.late_join.peer_index == peer_index) {
+        return !boot_data.late_join.transfer_in_progress &&
+               boot_data.late_join.awaiting_load_complete;
+    }
+
+    if (boot_data.reconnect.active && boot_data.reconnect.peer_index == peer_index) {
+        return !boot_data.reconnect.transfer_in_progress &&
+               boot_data.reconnect.awaiting_load_complete;
+    }
+
+    return 1;
+}
+
 /* ---- Phase 6: Late join handler ---- */
 
 int mp_bootstrap_host_handle_late_join(uint8_t peer_index, const char *player_name,
@@ -1209,11 +1227,19 @@ int mp_bootstrap_host_handle_late_join(uint8_t peer_index, const char *player_na
 
     /* 9. Send GAME_PREPARE + save transfer + snapshot + GAME_START_FINAL */
     {
-        /* Send manifest */
+        /* Late join must use the saved-game bootstrap path so the client waits
+         * for the checkpoint transfer instead of treating this as a fresh load. */
+        mp_game_manifest late_join_manifest = *mp_game_manifest_get();
         uint8_t manifest_buf[MP_GAME_MANIFEST_WIRE_MAX];
         uint32_t manifest_size = 0;
-        mp_game_manifest_set_player_count((uint8_t)mp_player_registry_get_count());
-        mp_game_manifest_serialize(manifest_buf, &manifest_size);
+
+        late_join_manifest.mode = MP_GAME_MODE_SAVED_GAME;
+        late_join_manifest.save_version = MP_SAVE_VERSION;
+        late_join_manifest.player_count = (uint8_t)mp_player_registry_get_count();
+        late_join_manifest.valid = 1;
+
+        mp_game_manifest_serialize_explicit(&late_join_manifest,
+                                            manifest_buf, &manifest_size);
         net_session_send_to_peer(peer_index, NET_MSG_GAME_PREPARE,
                                  manifest_buf, manifest_size);
     }

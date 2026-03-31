@@ -8,6 +8,7 @@
 #include "core/string.h"
 #include "core/time.h"
 #include "figure/formation.h"
+#include "game/game.h"
 #include "game/resource.h"
 #include "game/settings.h"
 #include "game/time.h"
@@ -215,7 +216,16 @@ void city_message_post(int use_popup, int message_type, int param1, int param2)
     lang_message_type lang_msg_type = lang_get_message(text_id)->message_type;
     if (lang_msg_type == MESSAGE_TYPE_DISASTER || lang_msg_type == MESSAGE_TYPE_INVASION) {
         data.problem_count = 1;
-        window_invalidate();
+        if (!game_is_headless_server()) {
+            window_invalidate();
+        }
+    }
+
+    /* Dedicated server keeps the message history for save/simulation purposes,
+     * but it must not touch popup, warning, sound, or window state. */
+    if (game_is_headless_server()) {
+        should_play_sound = 1;
+        return;
     }
 
     // Since custom messages are scenario specific, don't show them as simple alerts at the top

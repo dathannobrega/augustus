@@ -171,6 +171,7 @@ void mp_bootstrap_host_cancel_reconnect(uint8_t peer_index);
 void mp_bootstrap_host_complete_reconnect(uint8_t peer_index);
 void mp_bootstrap_host_cancel_late_join(uint8_t peer_index);
 void mp_bootstrap_host_complete_late_join(uint8_t peer_index);
+int mp_bootstrap_host_accepts_load_complete(uint8_t peer_index);
 int mp_bootstrap_host_handle_late_join(uint8_t peer_index, const char *player_name,
                                        uint8_t *out_reject_reason);
 
